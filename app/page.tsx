@@ -7,7 +7,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { 
   Copy, Check, Terminal, Cpu, Sparkles, Plus, MessageSquare, Trash2, LogIn, LogOut, Menu, X, User as UserIcon, 
-  Image as ImageIcon, Mic, Volume2, StopCircle, VolumeX, EyeOff, Camera, ScanText
+  Image as ImageIcon, Mic, Volume2, StopCircle, VolumeX, Camera, ScanText, FileText
 } from 'lucide-react';
 import { db, auth } from '@/lib/firebase';
 import { signOut, onAuthStateChanged, User } from 'firebase/auth';
@@ -38,6 +38,8 @@ type Session = {
 const sanitizeInput = (str: string) => str.replace(/[<>]/g, '');
 
 // --- COMPONENTS ---
+
+// 1. Code Block with Copy Feature
 const CodeBlock = ({ language, code }: { language: string, code: string }) => {
   const [copied, setCopied] = useState(false);
   const handleCopy = () => {
@@ -47,10 +49,10 @@ const CodeBlock = ({ language, code }: { language: string, code: string }) => {
   };
 
   return (
-    <div className="my-3 rounded-lg overflow-hidden bg-[#1e1f20] border border-[#2c2d2e] font-mono text-xs md:text-sm shadow-md w-full">
-      <div className="flex justify-between items-center bg-[#2c2d2e] px-3 py-1.5 text-gray-300 select-none">
-        <span className="text-[10px] uppercase tracking-wider font-semibold text-gray-400">{language || 'code'}</span>
-        <button onClick={handleCopy} className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-white transition-colors">
+    <div className="my-4 rounded-xl overflow-hidden bg-[#1e1f20] border border-[#2c2d2e] shadow-lg w-full group">
+      <div className="flex justify-between items-center bg-[#262729] px-4 py-2 border-b border-[#2c2d2e] select-none">
+        <span className="text-[11px] uppercase tracking-wider font-bold text-gray-400 font-mono">{language || 'text'}</span>
+        <button onClick={handleCopy} className="flex items-center gap-1.5 text-[11px] font-medium text-gray-400 hover:text-white transition-colors bg-white/5 hover:bg-white/10 px-2 py-1 rounded-md">
           {copied ? <Check size={12} className="text-green-400" /> : <Copy size={12} />}
           <span>{copied ? 'Copied' : 'Copy'}</span>
         </button>
@@ -62,7 +64,7 @@ const CodeBlock = ({ language, code }: { language: string, code: string }) => {
           PreTag="div" 
           showLineNumbers={true} 
           wrapLines={true} 
-          customStyle={{ margin: 0, padding: '1rem', background: '#1e1f20', fontSize: 'inherit', lineHeight: '1.5' }}
+          customStyle={{ margin: 0, padding: '1rem', background: '#1e1f20', fontSize: '13px', lineHeight: '1.6' }}
         >
           {code}
         </SyntaxHighlighter>
@@ -71,7 +73,7 @@ const CodeBlock = ({ language, code }: { language: string, code: string }) => {
   );
 };
 
-// ✅ UPDATED: MarkdownRenderer with Toggle Logic & Mobile Visibility
+// 2. Markdown Renderer (Industry Grade & Responsive)
 const MarkdownRenderer = ({ 
   content, 
   msgId, 
@@ -84,28 +86,45 @@ const MarkdownRenderer = ({
   onToggleSpeak: (text: string, id: string) => void 
 }) => {
   return (
-    <div className="relative group max-w-full overflow-hidden">
+    <div className="relative group max-w-full">
+      {/* FIX: Button is now absolute positioned INSIDE the padding.
+         Default opacity is 40% (visible on mobile), 100% on hover/active.
+      */}
       <button 
         onClick={() => onToggleSpeak(content, msgId)}
-        // ✅ Fixed: Removed 'opacity-0 group-hover:opacity-100' to make it visible on mobile/all screens
-        className="absolute -top-2 -right-2 p-1.5 bg-[#383a3c] rounded-full text-gray-400 hover:text-white transition-all shadow-md z-10"
-        title={isSpeaking ? "Stop" : "Read Aloud"}
+        className={`absolute top-0 right-0 p-2 rounded-lg transition-all duration-200 z-10
+          ${isSpeaking 
+            ? 'bg-red-500/10 text-red-400 opacity-100 ring-1 ring-red-500/50' 
+            : 'text-gray-400 hover:text-white hover:bg-white/10 opacity-0 group-hover:opacity-100 focus:opacity-100 active:opacity-100 mobile-visible'
+          }`}
+        title={isSpeaking ? "Stop Reading" : "Read Aloud"}
+        aria-label={isSpeaking ? "Stop Reading" : "Read Aloud"}
       >
-        {/* ✅ Icon Toggles based on state */}
-        {isSpeaking ? <StopCircle size={14} className="text-red-400" /> : <Volume2 size={14} />}
+        {isSpeaking ? <StopCircle size={16} className="animate-pulse" /> : <Volume2 size={16} />}
       </button>
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
-        code({ node, inline, className, children, ...props }: any) {
-          const match = /language-(\w+)/.exec(className || '');
-          return !inline && match ? <CodeBlock language={match[1]} code={String(children).replace(/\n$/, '')} /> : <code className="bg-[#2c2d2e] text-orange-200 px-1 py-0.5 rounded text-xs font-mono border border-white/5 break-words whitespace-pre-wrap" {...props}>{children}</code>;
-        },
-        p({ children }) { return <p className="mb-3 text-sm md:text-[15px] leading-6 md:leading-7 text-gray-200">{children}</p>; },
-        ul({ children }) { return <ul className="list-disc pl-4 mb-3 space-y-1 text-gray-300 text-sm md:text-[15px]">{children}</ul>; },
-        ol({ children }) { return <ol className="list-decimal pl-4 mb-3 space-y-1 text-gray-300 text-sm md:text-[15px]">{children}</ol>; },
-        h1({ children }) { return <h1 className="text-lg md:text-xl font-bold mb-3 text-white pb-2 border-b border-gray-700">{children}</h1>; },
-        h2({ children }) { return <h2 className="text-base md:text-lg font-bold mb-2 text-white mt-4">{children}</h2>; },
-        h3({ children }) { return <h3 className="text-sm md:text-base font-bold mb-2 text-white mt-3">{children}</h3>; },
-      }}>{content}</ReactMarkdown>
+
+      {/* Content Container with right padding to prevent overlap with speaker icon */}
+      <div className="pr-8">
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
+          code({ node, inline, className, children, ...props }: any) {
+            const match = /language-(\w+)/.exec(className || '');
+            return !inline && match ? 
+              <CodeBlock language={match[1]} code={String(children).replace(/\n$/, '')} /> : 
+              <code className="bg-[#2c2d2e] text-orange-200 px-1.5 py-0.5 rounded-md text-[13px] font-mono border border-white/5 break-words whitespace-pre-wrap" {...props}>{children}</code>;
+          },
+          p({ children }) { return <p className="mb-4 text-[15px] leading-7 text-gray-200">{children}</p>; },
+          ul({ children }) { return <ul className="list-disc pl-5 mb-4 space-y-2 text-gray-300 text-[15px] marker:text-gray-500">{children}</ul>; },
+          ol({ children }) { return <ol className="list-decimal pl-5 mb-4 space-y-2 text-gray-300 text-[15px] marker:text-gray-500">{children}</ol>; },
+          h1({ children }) { return <h1 className="text-xl md:text-2xl font-bold mb-4 text-white pb-2 border-b border-gray-700/50">{children}</h1>; },
+          h2({ children }) { return <h2 className="text-lg md:text-xl font-bold mb-3 text-white mt-6">{children}</h2>; },
+          h3({ children }) { return <h3 className="text-base md:text-lg font-bold mb-2 text-white mt-4">{children}</h3>; },
+          a({ children, href }) { return <a href={href} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 underline underline-offset-4 decoration-blue-400/30 hover:decoration-blue-400 transition-all">{children}</a>; },
+          blockquote({ children }) { return <blockquote className="border-l-4 border-blue-500/30 pl-4 py-1 my-4 bg-blue-500/5 rounded-r-lg italic text-gray-400">{children}</blockquote>; },
+          table({ children }) { return <div className="overflow-x-auto my-4 rounded-lg border border-gray-700/50"><table className="min-w-full text-left text-sm text-gray-300">{children}</table></div>; },
+          th({ children }) { return <th className="bg-[#262729] p-3 font-semibold text-white border-b border-gray-700">{children}</th>; },
+          td({ children }) { return <td className="p-3 border-b border-gray-700/50">{children}</td>; },
+        }}>{content}</ReactMarkdown>
+      </div>
     </div>
   );
 };
@@ -123,7 +142,6 @@ export default function Home() {
   const [image, setImage] = useState<string | null>(null);
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false); 
-  // ✅ New State: Track which message is currently speaking
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
 
   const [cameraMode, setCameraMode] = useState<'capture' | 'scan' | null>(null);
@@ -211,29 +229,21 @@ export default function Home() {
 
     try {
       await deleteDoc(doc(db, 'sessions', sessId));
-
       const q = query(collection(db, 'chats'), where('sessionId', '==', sessId));
       const snapshot = await getDocs(q);
-
       const BATCH_SIZE = 450;
       let batch = writeBatch(db);
       let count = 0;
-
       for (const doc of snapshot.docs) {
         batch.delete(doc.ref);
         count++;
-
         if (count >= BATCH_SIZE) {
           await batch.commit();
           batch = writeBatch(db); 
           count = 0;
         }
       }
-
-      if (count > 0) {
-        await batch.commit();
-      }
-
+      if (count > 0) await batch.commit();
     } catch (error) {
       console.error("Error deleting session:", error);
       alert("Failed to delete chat history.");
@@ -273,18 +283,23 @@ export default function Home() {
     recognition.start();
   };
 
-  // ✅ UPDATED: speakText now accepts msgId and handles toggle
-  const speakText = (text: string, msgId: string) => {
-    window.speechSynthesis.cancel();
-    
-    // Toggle OFF if clicking the active speaker
+  // ✅ ROBUST TTS TOGGLE
+  const toggleSpeak = (text: string, msgId: string) => {
+    // If currently speaking THIS message, stop it.
     if (isSpeaking && speakingMessageId === msgId) {
-        setIsSpeaking(false);
-        setSpeakingMessageId(null);
+        stopSpeaking();
         return;
     }
 
+    // Otherwise, stop whatever was playing and start this one
+    window.speechSynthesis.cancel();
+    
     const utterance = new SpeechSynthesisUtterance(text);
+    // Optional: Select a better voice
+    const voices = window.speechSynthesis.getVoices();
+    const preferredVoice = voices.find(v => v.name.includes('Google US English') || v.name.includes('Samantha'));
+    if (preferredVoice) utterance.voice = preferredVoice;
+
     utterance.onstart = () => {
         setIsSpeaking(true);
         setSpeakingMessageId(msgId);
@@ -300,7 +315,6 @@ export default function Home() {
     window.speechSynthesis.speak(utterance);
   };
 
-  // ✅ UPDATED: Stop function resets ID
   const stopSpeaking = () => { 
       window.speechSynthesis.cancel(); 
       setIsSpeaking(false); 
@@ -345,10 +359,6 @@ export default function Home() {
         });
       }
       await addDoc(collection(db, 'chats'), { sessionId: sessId, role: 'assistant', content: fullResponse, provider, createdAt: serverTimestamp() });
-      
-      // ✅ REMOVED: Auto-speak logic removed as per request
-      // if (isListening) speakText(fullResponse, tempId); 
-
     } catch (err: any) { if (err.name !== 'AbortError') console.error(err); }
   };
 
@@ -400,7 +410,7 @@ export default function Home() {
   if (!user) return <Login />;
 
   return (
-    <div className="flex h-[100dvh] bg-[#131314] text-gray-100 font-sans overflow-hidden">
+    <div className="flex h-[100dvh] bg-[#131314] text-gray-100 font-sans overflow-hidden selection:bg-purple-500/30 selection:text-white">
       
       {/* CAMERA MODAL */}
       {cameraMode && (
@@ -412,17 +422,17 @@ export default function Home() {
         />
       )}
 
-      {/* MOBILE OVERLAY (Click to close sidebar on mobile) */}
+      {/* MOBILE OVERLAY */}
       {sidebarOpen && (
         <div 
-          className="fixed inset-0 bg-black/60 z-30 lg:hidden backdrop-blur-sm animate-in fade-in duration-200"
+          className="fixed inset-0 bg-black/60 z-30 lg:hidden backdrop-blur-md animate-in fade-in duration-200"
           onClick={() => setSidebarOpen(false)}
         />
       )}
 
       {/* SIDEBAR */}
       <aside 
-        className={`fixed inset-y-0 left-0 z-40 bg-[#1e1f20] border-r border-white/5 flex flex-col transition-all duration-300 ease-in-out
+        className={`fixed inset-y-0 left-0 z-40 bg-[#1e1f20] border-r border-white/5 flex flex-col transition-all duration-300 ease-in-out shadow-2xl
           lg:static lg:z-auto
           ${sidebarOpen ? 'translate-x-0 w-[280px]' : '-translate-x-full lg:translate-x-0 lg:w-0 lg:border-none'} 
           overflow-hidden whitespace-nowrap
@@ -432,15 +442,15 @@ export default function Home() {
           <div className="flex items-center gap-3">
             <button 
               onClick={() => setSidebarOpen(false)} 
-              className="p-2 text-gray-400 hover:bg-[#333537] hover:text-white rounded-full transition-colors"
+              className="p-2 text-gray-400 hover:bg-[#333537] hover:text-white rounded-full transition-colors active:scale-95"
               title="Close Menu"
             >
               <Menu size={20} />
             </button>
-            <span className="text-sm font-bold text-gray-200 px-2 lg:block hidden">TurboLearn</span>
+            <span className="text-sm font-bold text-gray-200 px-2 lg:block hidden tracking-wide">TurboLearn</span>
           </div>
 
-          <button onClick={startNewChat} className="flex items-center gap-3 px-4 py-3 rounded-full bg-[#1a1b1c] hover:bg-[#333537] transition-all text-sm font-medium text-gray-300 shadow-sm border border-white/5 active:scale-95">
+          <button onClick={startNewChat} className="flex items-center gap-3 px-4 py-3 rounded-full bg-gradient-to-r from-[#1a1b1c] to-[#202123] hover:from-[#333537] hover:to-[#383a3c] transition-all text-sm font-medium text-gray-200 shadow-md border border-white/5 active:scale-95">
             <Plus size={18} className="text-gray-400" /> New chat
           </button>
         </div>
@@ -450,7 +460,7 @@ export default function Home() {
           <div className="space-y-1">
             {sessions.map((sess) => (
               <div key={sess.id} onClick={() => selectSession(sess.id)}
-                className={`group flex items-center justify-between px-3 py-3 rounded-lg cursor-pointer text-sm transition-all ${currentSessionId === sess.id ? 'bg-[#004a77]/40 text-blue-100' : 'text-gray-400 hover:bg-[#282a2c] hover:text-gray-200'}`}>
+                className={`group flex items-center justify-between px-3 py-3 rounded-lg cursor-pointer text-sm transition-all border border-transparent ${currentSessionId === sess.id ? 'bg-[#004a77]/30 text-blue-100 border-blue-500/20 shadow-sm' : 'text-gray-400 hover:bg-[#282a2c] hover:text-gray-200'}`}>
                 <div className="flex items-center gap-3 overflow-hidden">
                   <MessageSquare size={16} className="flex-none opacity-70" />
                   <span className="truncate w-40">{sess.title}</span>
@@ -468,10 +478,10 @@ export default function Home() {
         </div>
 
         <div className="p-4 mt-auto border-t border-white/5 bg-[#171819] min-w-[280px]">
-          <div className="flex items-center gap-3 px-2 py-2 hover:bg-[#2c2d2e] rounded-lg cursor-pointer transition-colors" onClick={handleLogout}>
-             {user.photoURL ? <img src={user.photoURL} className="w-8 h-8 rounded-full border border-gray-600" /> : <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center"><UserIcon size={16} /></div>}
+          <div className="flex items-center gap-3 px-3 py-2.5 hover:bg-[#2c2d2e] rounded-xl cursor-pointer transition-colors group" onClick={handleLogout}>
+             {user.photoURL ? <img src={user.photoURL} className="w-8 h-8 rounded-full border border-gray-600 group-hover:border-gray-400 transition-colors" /> : <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center"><UserIcon size={16} /></div>}
              <div className="text-sm font-medium truncate flex-1 text-gray-200">{user.displayName}</div>
-             <LogOut size={16} className="text-gray-500" />
+             <LogOut size={16} className="text-gray-500 group-hover:text-gray-300 transition-colors" />
           </div>
         </div>
       </aside>
@@ -479,41 +489,41 @@ export default function Home() {
       {/* MAIN CONTENT */}
       <main className="flex-1 flex flex-col h-[100dvh] relative bg-[#131314] w-full min-w-0">
         
-        {/* HEADER */}
-        <div className="flex-none h-16 flex items-center px-4 z-20 bg-gradient-to-b from-[#131314] via-[#131314]/95 to-transparent backdrop-blur-none">
+        {/* HEADER (Floating) */}
+        <div className="flex-none h-16 flex items-center px-4 z-20 absolute top-0 w-full bg-transparent">
           <button 
             onClick={() => setSidebarOpen(true)} 
-            className={`p-2 text-gray-400 hover:bg-[#2c2d2e] hover:text-white rounded-full transition-colors mr-3 active:scale-95 ${sidebarOpen ? 'lg:hidden opacity-0 pointer-events-none' : 'opacity-100'}`}
+            className={`p-2 text-gray-400 hover:bg-[#2c2d2e]/80 hover:text-white rounded-full transition-colors mr-3 active:scale-95 backdrop-blur-sm ${sidebarOpen ? 'lg:hidden opacity-0 pointer-events-none' : 'opacity-100'}`}
           >
             <Menu size={24} />
           </button>
 
-          {!currentSessionId && groqMessages.length === 0 && <span className="text-base md:text-lg font-medium text-gray-500 mx-auto pointer-events-none tracking-tight">TurboLearn AI</span>}
+          {!currentSessionId && groqMessages.length === 0 && <span className="text-base md:text-lg font-medium text-gray-500 mx-auto pointer-events-none tracking-tight opacity-50">TurboLearn AI</span>}
           
           {isSpeaking && (
-            <button onClick={stopSpeaking} className="ml-auto flex items-center gap-2 bg-red-600/90 backdrop-blur-md hover:bg-red-700 text-white px-3 py-1.5 rounded-full shadow-lg transition-all animate-pulse text-xs font-bold z-50">
-              <VolumeX size={14} /> <span className="hidden md:inline">Stop</span>
+            <button onClick={stopSpeaking} className="ml-auto flex items-center gap-2 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 backdrop-blur-md text-red-400 px-4 py-1.5 rounded-full shadow-lg transition-all animate-pulse text-xs font-bold z-50">
+              <VolumeX size={14} /> <span className="hidden md:inline">Stop Reading</span>
             </button>
           )}
         </div>
 
         {/* CHAT SCROLL AREA */}
-        <div className="flex-1 overflow-y-auto custom-scrollbar p-3 md:p-4 pb-0">
-          <div className={`mx-auto grid grid-cols-1 lg:grid-cols-2 gap-4 h-full pb-36 md:pb-40 transition-all duration-300 ${sidebarOpen ? 'max-w-6xl' : 'max-w-7xl'}`}>
+        <div className="flex-1 overflow-y-auto custom-scrollbar p-3 md:p-6 pb-0 pt-20">
+          <div className={`mx-auto grid grid-cols-1 lg:grid-cols-2 gap-6 h-full pb-40 transition-all duration-300 ${sidebarOpen ? 'max-w-6xl' : 'max-w-7xl'}`}>
             
             {/* GROQ CARD */}
-            <div className="flex flex-col rounded-2xl bg-[#1e1f20] border border-[#2c2d2e] shadow-lg relative min-h-[250px] lg:min-h-0">
-              <div className="flex items-center gap-2 px-4 py-3 bg-[#1e1f20] border-b border-[#2c2d2e] rounded-t-2xl sticky top-0 z-10">
+            <div className="flex flex-col rounded-2xl bg-[#1e1f20] border border-[#2c2d2e] shadow-xl relative min-h-[250px] lg:min-h-0 overflow-hidden">
+              <div className="flex items-center gap-2 px-5 py-3 bg-[#1e1f20]/90 backdrop-blur-sm border-b border-[#2c2d2e] sticky top-0 z-10">
                 <Cpu size={16} className="text-orange-400" />
-                <span className="font-semibold text-gray-200 text-xs md:text-sm">Llama 3.3 (Fast)</span>
+                <span className="font-semibold text-gray-200 text-xs md:text-sm tracking-wide">Llama 3.3 (Reasoning)</span>
               </div>
-              <div className="flex-1 p-3 md:p-4 overflow-y-auto custom-scrollbar">
-                {!currentSessionId && groqMessages.length === 0 && <div className="h-40 md:h-full flex items-center justify-center text-gray-700 opacity-30"><Cpu size={40} /></div>}
+              <div className="flex-1 p-4 md:p-5 overflow-y-auto custom-scrollbar">
+                {!currentSessionId && groqMessages.length === 0 && <div className="h-40 md:h-full flex flex-col gap-2 items-center justify-center text-gray-700 opacity-40"><Cpu size={48} /><span className="text-xs font-medium">Ready</span></div>}
                 {groqMessages.map((m, i) => (
-                  <div key={i} className={`mb-4 md:mb-6 flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                    <div className={`max-w-[95%] md:max-w-[90%] ${m.role === 'user' ? 'bg-[#2c2d2e] px-3 py-2 md:px-4 md:py-2.5 rounded-2xl' : ''}`}>
+                  <div key={i} className={`mb-6 flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    <div className={`max-w-[95%] md:max-w-[90%] ${m.role === 'user' ? 'bg-[#2c2d2e] px-4 py-3 rounded-2xl rounded-tr-none' : ''}`}>
                       <div className="prose prose-invert max-w-none text-gray-100 text-sm leading-relaxed break-words">
-                          {m.role === 'user' ? <p>{m.content}</p> : <MarkdownRenderer content={m.content} msgId={m.id || `groq-${i}`} isSpeaking={speakingMessageId === (m.id || `groq-${i}`)} onToggleSpeak={speakText} />}
+                          {m.role === 'user' ? <p>{m.content}</p> : <MarkdownRenderer content={m.content} msgId={m.id || `groq-${i}`} isSpeaking={speakingMessageId === (m.id || `groq-${i}`)} onToggleSpeak={toggleSpeak} />}
                       </div>
                     </div>
                   </div>
@@ -523,19 +533,19 @@ export default function Home() {
             </div>
 
             {/* GEMINI CARD */}
-            <div className="flex flex-col rounded-2xl bg-[#1e1f20] border border-[#2c2d2e] shadow-lg min-h-[250px] lg:min-h-0">
-              <div className="flex items-center gap-2 px-4 py-3 bg-[#1e1f20] border-b border-[#2c2d2e] rounded-t-2xl sticky top-0 z-10">
+            <div className="flex flex-col rounded-2xl bg-[#1e1f20] border border-[#2c2d2e] shadow-xl min-h-[250px] lg:min-h-0 overflow-hidden">
+              <div className="flex items-center gap-2 px-5 py-3 bg-[#1e1f20]/90 backdrop-blur-sm border-b border-[#2c2d2e] sticky top-0 z-10">
                 <Sparkles size={16} className="text-blue-400" />
-                <span className="font-semibold text-gray-200 text-xs md:text-sm">Gemini 2.5 (Vision)</span>
+                <span className="font-semibold text-gray-200 text-xs md:text-sm tracking-wide">Gemini 2.5 (Vision)</span>
               </div>
-              <div className="flex-1 p-3 md:p-4 overflow-y-auto custom-scrollbar">
-                {!currentSessionId && googleMessages.length === 0 && <div className="h-40 md:h-full flex items-center justify-center text-gray-700 opacity-30"><Sparkles size={40} /></div>}
+              <div className="flex-1 p-4 md:p-5 overflow-y-auto custom-scrollbar">
+                {!currentSessionId && googleMessages.length === 0 && <div className="h-40 md:h-full flex flex-col gap-2 items-center justify-center text-gray-700 opacity-40"><Sparkles size={48} /><span className="text-xs font-medium">Ready</span></div>}
                 {googleMessages.map((m, i) => (
-                  <div key={i} className={`mb-4 md:mb-6 flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                    <div className={`max-w-[95%] md:max-w-[90%] ${m.role === 'user' ? 'bg-[#2c2d2e] px-3 py-2 md:px-4 md:py-2.5 rounded-2xl' : ''}`}>
-                       {m.image && (<div className="mb-2"><img src={m.image} alt="Upload" className="max-h-40 md:max-h-48 rounded-lg border border-[#3c3d3e] object-contain bg-black/50" /></div>)}
+                  <div key={i} className={`mb-6 flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    <div className={`max-w-[95%] md:max-w-[90%] ${m.role === 'user' ? 'bg-[#2c2d2e] px-4 py-3 rounded-2xl rounded-tr-none' : ''}`}>
+                       {m.image && (<div className="mb-3"><img src={m.image} alt="Upload" className="max-h-48 rounded-lg border border-[#3c3d3e] object-contain bg-black/50" /></div>)}
                        <div className="prose prose-invert max-w-none text-gray-100 text-sm leading-relaxed break-words">
-                         {m.role === 'user' ? <p>{m.content}</p> : <MarkdownRenderer content={m.content} msgId={m.id || `google-${i}`} isSpeaking={speakingMessageId === (m.id || `google-${i}`)} onToggleSpeak={speakText} />}
+                         {m.role === 'user' ? <p>{m.content}</p> : <MarkdownRenderer content={m.content} msgId={m.id || `google-${i}`} isSpeaking={speakingMessageId === (m.id || `google-${i}`)} onToggleSpeak={toggleSpeak} />}
                       </div>
                     </div>
                   </div>
@@ -546,49 +556,58 @@ export default function Home() {
           </div>
         </div>
 
-        {/* INPUT AREA (Fixed Bottom) */}
-        <div className="flex-none p-3 md:p-6 bg-[#131314] pb-[calc(env(safe-area-inset-bottom)+12px)] absolute bottom-0 w-full z-20">
+        {/* INPUT AREA (Fixed Bottom with Glassmorphism) */}
+        <div className="flex-none p-3 md:p-6 bg-gradient-to-t from-[#131314] via-[#131314] to-transparent pb-[calc(env(safe-area-inset-bottom)+12px)] absolute bottom-0 w-full z-20">
           <div className={`mx-auto relative transition-all duration-300 ${sidebarOpen ? 'max-w-4xl' : 'max-w-5xl'}`}>
+            
+            {/* Image Preview */}
             {image && (
-              <div className="absolute -top-14 left-0 bg-[#1e1f20] p-1.5 rounded-lg border border-[#2c2d2e] flex items-center gap-2 shadow-xl animate-in slide-in-from-bottom-2">
-                <img src={image} alt="Preview" className="h-10 w-10 object-cover rounded" />
-                <button onClick={() => setImage(null)} className="p-1 hover:text-red-400 text-gray-400"><X size={14}/></button>
+              <div className="absolute -top-16 left-0 bg-[#1e1f20]/90 backdrop-blur-md p-2 rounded-xl border border-[#2c2d2e] flex items-center gap-3 shadow-2xl animate-in slide-in-from-bottom-2 z-10">
+                <img src={image} alt="Preview" className="h-10 w-10 object-cover rounded-lg" />
+                <span className="text-xs text-gray-400 font-medium">Image attached</span>
+                <button onClick={() => setImage(null)} className="p-1 hover:text-red-400 text-gray-400 transition-colors"><X size={14}/></button>
               </div>
             )}
+
+            {/* Input Form */}
             <form onSubmit={handleSearch} className="relative group">
               <input
                 type="text"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 placeholder={isListening ? "Listening..." : "Ask anything or scan..."}
-                className={`w-full bg-[#1e1f20] text-gray-100 placeholder-gray-500 rounded-full py-3.5 pl-32 pr-28 focus:outline-none focus:bg-[#262729] focus:ring-1 focus:ring-white/10 transition-all text-[15px] border border-[#2c2d2e] shadow-lg ${isListening ? 'border-red-500/50 bg-red-500/5' : ''}`}
-                style={{ fontSize: '16px' }} 
+                className={`w-full bg-[#1e1f20]/80 backdrop-blur-xl text-gray-100 placeholder-gray-500 rounded-full py-4 pl-36 pr-28 
+                  focus:outline-none focus:bg-[#1e1f20] focus:ring-1 focus:ring-white/10 focus:shadow-[0_0_20px_rgba(0,0,0,0.5)] 
+                  transition-all text-[15px] border border-[#2c2d2e] shadow-xl
+                  ${isListening ? 'border-red-500/50 bg-red-900/10' : ''}`}
+                style={{ fontSize: '16px' }} // Prevents iOS zoom
               />
               
               {/* LEFT ACTIONS (Media) */}
-              <div className="absolute left-2 top-1.5 bottom-1.5 flex items-center gap-0.5">
-                <button type="button" onClick={() => fileInputRef.current?.click()} className="p-2 text-gray-400 hover:text-white rounded-full transition-colors active:bg-white/10" title="Upload Image"><ImageIcon size={20} /></button>
+              <div className="absolute left-2 top-2 bottom-2 flex items-center gap-1 bg-[#2c2d2e]/50 rounded-full px-1 backdrop-blur-sm border border-white/5">
+                <button type="button" onClick={() => fileInputRef.current?.click()} className="p-2 text-gray-400 hover:text-white rounded-full transition-colors hover:bg-white/10" title="Upload Image"><ImageIcon size={18} /></button>
                 <input type="file" ref={fileInputRef} onChange={handleImageUpload} accept="image/*" className="hidden" />
-                <button type="button" onClick={() => setCameraMode('capture')} className="p-2 text-gray-400 hover:text-blue-400 rounded-full transition-colors active:bg-white/10" title="Take Photo"><Camera size={20} /></button>
-                <button type="button" onClick={() => setCameraMode('scan')} className="p-2 text-gray-400 hover:text-green-400 rounded-full transition-colors active:bg-white/10" title="Scan Text (Lens)"><ScanText size={20} /></button>
+                <div className="w-[1px] h-4 bg-white/10"></div>
+                <button type="button" onClick={() => setCameraMode('capture')} className="p-2 text-gray-400 hover:text-blue-400 rounded-full transition-colors hover:bg-white/10" title="Take Photo"><Camera size={18} /></button>
+                <button type="button" onClick={() => setCameraMode('scan')} className="p-2 text-gray-400 hover:text-green-400 rounded-full transition-colors hover:bg-white/10" title="Scan Text (Lens)"><ScanText size={18} /></button>
               </div>
 
               {/* RIGHT ACTIONS (Voice/Send) */}
-              <div className="absolute right-2 top-1.5 bottom-1.5 flex items-center gap-1">
-                <button type="button" onClick={toggleVoiceInput} className={`p-2 rounded-full transition-all active:scale-90 ${isListening ? 'text-red-500 bg-red-500/10' : 'text-gray-400 hover:text-white hover:bg-white/10'}`}>
+              <div className="absolute right-2 top-2 bottom-2 flex items-center gap-2">
+                <button type="button" onClick={toggleVoiceInput} className={`p-2.5 rounded-full transition-all active:scale-90 ${isListening ? 'text-white bg-red-500 animate-pulse shadow-lg shadow-red-500/30' : 'text-gray-400 hover:text-white hover:bg-white/10'}`}>
                   <Mic size={20} />
                 </button>
                 <button 
                   type={loading ? 'button' : 'submit'} 
                   onClick={loading ? stopGenerating : undefined} 
-                  className={`p-2 rounded-full transition-all active:scale-90 ${loading ? 'bg-white text-black' : 'bg-[#3c3d3e] text-white disabled:opacity-50 disabled:bg-transparent'}`} 
+                  className={`p-2.5 rounded-full transition-all active:scale-90 shadow-lg ${loading ? 'bg-white text-black' : 'bg-[#2c2d2e] text-white hover:bg-[#3c3d3e] disabled:opacity-50 disabled:bg-transparent disabled:shadow-none'}`} 
                   disabled={(!input.trim() && !image) && !loading}
                 >
-                  {loading ? <StopCircle size={20} fill="black" /> : <Terminal size={20} />}
+                  {loading ? <StopCircle size={20} fill="currentColor" /> : <Terminal size={20} />}
                 </button>
               </div>
             </form>
-            <p className="text-center text-[10px] text-gray-600 mt-2 hidden md:block">TurboLearn AI • Gemini 2.5 Flash • Llama 3.3</p>
+            <p className="text-center text-[10px] text-gray-600 mt-3 hidden md:block font-medium tracking-wide">TurboLearn AI • Gemini 2.5 Flash • Llama 3.3</p>
           </div>
         </div>
       </main>
