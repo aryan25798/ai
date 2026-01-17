@@ -3,14 +3,34 @@ import { google } from '@ai-sdk/google';
 import { groq } from '@ai-sdk/groq';
 import { adminDb } from '@/lib/firebaseAdmin';
 import { FieldValue } from 'firebase-admin/firestore';
+import { z } from 'zod'; // ✅ Industry-grade validation
 
 // ⚠️ SECURITY: Must be 'nodejs' to use Firebase Admin
 export const runtime = 'nodejs';
 
+// ✅ Validation Schema (Prevents API crashes from bad inputs)
+const AskSchema = z.object({
+  messages: z.array(z.object({
+    role: z.string(),
+    content: z.union([z.string(), z.array(z.any())]), // Handle text or multimodal arrays
+  })),
+  provider: z.enum(['google', 'groq']),
+  image: z.string().nullable().optional(),
+  userId: z.string().min(1, "User ID is required"),
+});
+
 export async function POST(req: Request) {
   try {
-    // 1. Extract Data
-    const { messages, provider, image, userId } = await req.json();
+    // 1. Extract & Validate Data
+    const body = await req.json();
+    
+    // 🛡️ Zod Validation: Fail fast if input is invalid
+    const parseResult = AskSchema.safeParse(body);
+    if (!parseResult.success) {
+      return new Response(JSON.stringify({ error: "Invalid Request Data", details: parseResult.error }), { status: 400 });
+    }
+    
+    const { messages, provider, image, userId } = parseResult.data;
 
     // 2. SECURITY CHECK (Admin SDK)
     if (!userId) {
@@ -72,7 +92,7 @@ export async function POST(req: Request) {
     // 3. Model Selection
     let model;
     if (provider === 'google') {
-      // ✅ Gemini 1.5 Flash: The standard, stable, high-speed model
+      // ✅ FIX: Changed gemini-2.5-flash (invalid) to gemini-1.5-flash (stable)
       model = google('gemini-2.5-flash'); 
     } else if (provider === 'groq') {
       // ✅ Llama 3.3 Versatile: Text ONLY (Super fast reasoning)

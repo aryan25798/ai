@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
-import { db } from '@/lib/firebase';
-import { doc, getDoc } from 'firebase/firestore';
+import { adminDb } from '@/lib/firebaseAdmin'; // ✅ Switched to Admin SDK for secure server-side access
 
 // ⚠️ SECURITY: Use 'nodejs' runtime for stable database checks
 export const runtime = 'nodejs';
@@ -15,17 +14,18 @@ export async function POST(req: Request) {
     }
 
     try {
-      const userRef = doc(db, 'users', userId);
-      const userSnap = await getDoc(userRef);
+      // ✅ Use Admin SDK to check user status (Bypasses RLS issues on server)
+      const userRef = adminDb.collection('users').doc(userId);
+      const userSnap = await userRef.get();
 
-      if (!userSnap.exists()) {
+      if (!userSnap.exists) {
         return NextResponse.json({ error: 'User not found' }, { status: 403 });
       }
 
       const userData = userSnap.data();
 
       // 🛑 BLOCK if Pending or Banned (Admin is exempt)
-      if (userData.status !== 'approved' && userData.role !== 'admin') {
+      if (userData?.status !== 'approved' && userData?.role !== 'admin') {
         return NextResponse.json({ error: 'Access Denied: Account not approved.' }, { status: 403 });
       }
     } catch (dbError) {

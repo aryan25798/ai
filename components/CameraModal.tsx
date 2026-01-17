@@ -5,11 +5,25 @@ import Webcam from 'react-webcam';
 import { X, Check, RotateCcw, ScanLine, Zap, ZapOff, Sun, Moon } from 'lucide-react';
 import { auth } from '@/lib/firebase'; // ✅ Added to get userId for secure API calls
 
-// Types
+// --- TYPES ---
 type BoundingBox = {
   text: string;
   box: number[]; // [x, y, width, height] in %
 };
+
+// ✅ IMPROVEMENT: Type definitions for advanced Camera capabilities
+interface MediaTrackCapabilities {
+  torch?: boolean;
+  exposureCompensation?: {
+    min: number;
+    max: number;
+    step: number;
+  };
+  focusMode?: string[];
+  exposureMode?: string[];
+  whiteBalanceMode?: string[];
+  pointsOfInterest?: boolean; // Chrome specific
+}
 
 interface CameraModalProps {
   mode: 'capture' | 'scan' | null;
@@ -52,16 +66,18 @@ export default function CameraModal({ mode, onClose, onCapture, onScan }: Camera
     setIsCameraReady(true);
     const track = stream.getVideoTracks()[0];
     
-    // Use 'any' to bypass strict TS checks for newer camera features
-    const capabilities = (track as any).getCapabilities ? (track as any).getCapabilities() : {};
+    // ✅ IMPROVEMENT: Type-safe capabilities check
+    // We still cast track to 'any' to access getCapabilities (which might be missing in some TS libs),
+    // but we cast the RESULT to our strict interface.
+    const capabilities = ((track as any).getCapabilities ? (track as any).getCapabilities() : {}) as MediaTrackCapabilities;
     const settings = track.getSettings();
 
     if (capabilities.torch) setHasTorch(true);
 
-    // ✅ FIX: TypeScript Error Resolved by casting settings to 'any'
     if (capabilities.exposureCompensation) {
       setExposureRange(capabilities.exposureCompensation);
-      setBrightness((settings as any).exposureCompensation || 0);
+      // @ts-ignore - exposureCompensation is standard in new browsers but missing in strict TS definitions
+      setBrightness(settings.exposureCompensation || 0);
     }
 
     // Apply "Monitor Mode" Defaults
