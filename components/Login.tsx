@@ -1,11 +1,11 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { LogIn, ArrowRight, ShieldAlert, Clock, Lock, Sparkles, Zap, ShieldCheck, Mail, Key } from 'lucide-react';
+import { LogIn, ArrowRight, ShieldAlert, Clock, Lock, Sparkles, Zap, ShieldCheck, Mail, Key, Loader2 } from 'lucide-react';
 import { auth, googleProvider, db } from '@/lib/firebase';
 import { signInWithPopup, signInWithEmailAndPassword, signOut } from 'firebase/auth';
-import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, getDoc, setDoc, serverTimestamp, onSnapshot } from 'firebase/firestore';
 
 export default function Login() {
   const [status, setStatus] = useState<'idle' | 'loading' | 'pending' | 'banned' | 'success'>('idle');
@@ -15,6 +15,36 @@ export default function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
 
+  // 1. REAL-TIME LISTENER FOR PENDING USERS
+  useEffect(() => {
+    let unsubscribe: () => void;
+
+    if (status === 'pending' && auth.currentUser) {
+      const userRef = doc(db, 'users', auth.currentUser.uid);
+      
+      // Open a live channel to the user's document
+      unsubscribe = onSnapshot(userRef, (docSnap) => {
+        const data = docSnap.data();
+        if (data) {
+          if (data.status === 'approved') {
+            // ✅ ADMIN APPROVED: Instantly switch to success
+            setStatus('success');
+            // Optional: Force reload to ensure main app picks up new role immediately
+            setTimeout(() => window.location.reload(), 500); 
+          } else if (data.status === 'banned') {
+            // ❌ ADMIN BANNED: Kick out immediately
+            setStatus('banned');
+            signOut(auth);
+          }
+        }
+      });
+    }
+
+    return () => {
+      if (unsubscribe) unsubscribe();
+    };
+  }, [status]);
+
   const processUser = async (user: any) => {
     const userRef = doc(db, 'users', user.uid);
     const userSnap = await getDoc(userRef);
@@ -22,15 +52,15 @@ export default function Login() {
     if (!userSnap.exists()) {
       // --- NEW USER LOGIC ---
       // Auto-make admin if it matches your specific email
-      const isAdmin = user.email === 'admin@system.com';
+      const isAdmin = user.email === 'admin@system.com'; // ⚠️ REPLACE WITH YOUR EMAIL IF NEEDED
       
       await setDoc(userRef, {
         uid: user.uid,
         email: user.email,
-        displayName: user.displayName || 'Admin',
+        displayName: user.displayName || 'User',
         photoURL: user.photoURL,
         role: isAdmin ? 'admin' : 'user',
-        status: isAdmin ? 'approved' : 'pending',
+        status: isAdmin ? 'approved' : 'pending', // Default to pending for security
         createdAt: serverTimestamp(),
         lastLogin: serverTimestamp()
       });
@@ -38,7 +68,8 @@ export default function Login() {
       if (isAdmin) {
            setStatus('success'); 
       } else {
-           await signOut(auth); 
+           // ✅ DO NOT SIGN OUT. Keep them logged in but trapped in 'pending' state
+           // This allows the onSnapshot listener above to work.
            setStatus('pending');
       }
     } else {
@@ -50,7 +81,7 @@ export default function Login() {
         await signOut(auth);
         setStatus('banned');
       } else if (userData.status === 'pending') {
-        await signOut(auth);
+        // ✅ Stay logged in, but show pending screen
         setStatus('pending');
       } else {
         setStatus('success');
@@ -76,7 +107,7 @@ export default function Login() {
       const result = await signInWithEmailAndPassword(auth, email, password);
       await processUser(result.user);
     } catch (err) {
-      alert("Invalid credentials");
+      alert("Invalid credentials or access denied.");
       setStatus('idle');
     }
   };
@@ -86,12 +117,12 @@ export default function Login() {
   if (status === 'pending') {
     return (
       <AccessDeniedScreen 
-        icon={<Clock size={48} className="text-yellow-400" />}
-        title="Approval Required"
-        description="Your account is created but waiting for admin approval."
-        subtext="Please contact Aryan (Admin) to activate access."
-        action={() => setStatus('idle')}
-        actionText="Back to Login"
+        icon={<Loader2 size={48} className="text-yellow-400 animate-spin" />}
+        title="Verification Pending"
+        description="Your secure line is established but requires administrator approval."
+        subtext="Please wait here. This page will automatically unlock when Aryan approves you."
+        action={async () => { await signOut(auth); setStatus('idle'); }}
+        actionText="Cancel & Logout"
       />
     );
   }
@@ -101,12 +132,25 @@ export default function Login() {
       <AccessDeniedScreen 
         icon={<ShieldAlert size={48} className="text-red-500" />}
         title="Access Revoked"
-        description="Your account has been permanently banned."
-        subtext="Contact support for appeals."
+        description="Your security clearance has been permanently revoked by the administrator."
+        subtext="This incident has been logged."
         action={() => setStatus('idle')}
-        actionText="Back to Login"
+        actionText="Return to Safety"
       />
     );
+  }
+
+  // Prevent flicker if success (Main app will take over)
+  if (status === 'success') {
+      return (
+        <div className="flex min-h-[100dvh] w-full items-center justify-center bg-black text-white">
+            <div className="flex flex-col items-center animate-pulse">
+                <ShieldCheck size={64} className="text-green-500 mb-4" />
+                <h2 className="text-xl font-bold">Access Granted</h2>
+                <p className="text-sm text-gray-500">Initializing secure environment...</p>
+            </div>
+        </div>
+      );
   }
 
   return (
@@ -182,7 +226,7 @@ export default function Login() {
             )}
             
             <p className="mt-6 text-[10px] text-neutral-600 flex items-center gap-2">
-              <Lock size={10} /> Access requires approval.
+              <Lock size={10} /> Protected by Firebase Security Rules.
             </p>
           </div>
         </div>
@@ -193,10 +237,16 @@ export default function Login() {
 
 const AccessDeniedScreen = ({ icon, title, description, subtext, action, actionText }: any) => (
   <div className="min-h-screen w-full bg-black flex flex-col items-center justify-center p-6 text-center animate-in fade-in zoom-in duration-500">
-    <div className="w-24 h-24 rounded-full bg-white/5 flex items-center justify-center mb-6 animate-pulse border border-white/10">{icon}</div>
-    <h2 className="text-3xl font-bold text-white mb-3">{title}</h2>
-    <p className="text-neutral-400 max-w-md text-base leading-relaxed mb-4">{description}</p>
-    <p className="text-indigo-400 font-medium text-sm mb-10 p-2 px-4 bg-indigo-500/10 rounded-lg border border-indigo-500/20">{subtext}</p>
+    <div className="w-24 h-24 rounded-full bg-white/5 flex items-center justify-center mb-6 border border-white/10 shadow-2xl shadow-yellow-900/20">{icon}</div>
+    <h2 className="text-3xl font-bold text-white mb-3 tracking-tight">{title}</h2>
+    <p className="text-neutral-400 max-w-md text-base leading-relaxed mb-6">{description}</p>
+    <div className="bg-[#111] border border-white/10 rounded-xl p-4 max-w-sm w-full mb-8">
+        <div className="flex items-center gap-3 mb-2">
+            <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse" />
+            <span className="text-xs font-bold text-gray-300 uppercase tracking-widest">Live Status Check</span>
+        </div>
+        <p className="text-xs text-gray-500">{subtext}</p>
+    </div>
     <button onClick={action} className="px-8 py-3 rounded-full bg-white text-black font-bold hover:bg-neutral-200 transition-colors flex items-center gap-2"><ArrowRight size={18} /> {actionText}</button>
   </div>
 );

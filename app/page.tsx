@@ -3,21 +3,23 @@
 import { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import remarkMath from 'remark-math'; // ✅ ADDED: For parsing math
-import rehypeKatex from 'rehype-katex'; // ✅ ADDED: For rendering math
+import remarkMath from 'remark-math'; 
+import rehypeKatex from 'rehype-katex'; 
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import 'katex/dist/katex.min.css'; // ✅ ADDED: Math CSS
+import 'katex/dist/katex.min.css'; 
 
 import { 
   Copy, Check, Terminal, Cpu, Sparkles, Plus, MessageSquare, Trash2, LogIn, LogOut, Menu, X, User as UserIcon, 
-  Image as ImageIcon, Mic, Volume2, StopCircle, VolumeX, Camera, ScanText, Maximize2, Minimize2, ArrowLeft, Shield
+  Image as ImageIcon, Mic, Volume2, StopCircle, VolumeX, Camera, ScanText, Maximize2, Minimize2, ArrowLeft, Shield,
+  Clock, ShieldAlert, Loader2, Lock
 } from 'lucide-react';
-import { db, auth } from '@/lib/firebase';
+import { db, auth, storage } from '@/lib/firebase';
 import { signOut, onAuthStateChanged, User } from 'firebase/auth';
 import { 
   collection, addDoc, query, where, orderBy, onSnapshot, serverTimestamp, deleteDoc, doc, getDocs, writeBatch, getDoc, setDoc, updateDoc 
 } from 'firebase/firestore';
+import { ref, uploadString, getDownloadURL } from 'firebase/storage';
 import Login from '@/components/Login';
 import CameraModal from '@/components/CameraModal';
 
@@ -36,7 +38,11 @@ type Session = {
   userId: string;
   title: string;
   createdAt: any;
+  deletedByUser?: boolean;
 };
+
+// New Status Type to handle UI switching
+type UserStatus = 'loading' | 'approved' | 'pending' | 'banned' | 'new';
 
 // --- UTILS ---
 const sanitizeInput = (str: string) => str.replace(/[<>]/g, '');
@@ -61,7 +67,7 @@ const CodeBlock = ({ language, code }: { language: string, code: string }) => {
           <span>{copied ? 'Copied' : 'Copy'}</span>
         </button>
       </div>
-      <div className="overflow-x-auto w-full">
+      <div className="overflow-x-auto w-full custom-scrollbar">
         <SyntaxHighlighter 
           language={language?.toLowerCase() || 'text'} 
           style={vscDarkPlus} 
@@ -104,10 +110,10 @@ const MarkdownRenderer = ({
         {isSpeaking ? <StopCircle size={16} className="animate-pulse" /> : <Volume2 size={16} />}
       </button>
 
-      <div className="pr-8">
+      <div className="pr-8 overflow-hidden">
         <ReactMarkdown 
-          remarkPlugins={[remarkGfm, remarkMath]} // ✅ ADDED remarkMath
-          rehypePlugins={[rehypeKatex]} // ✅ ADDED rehypeKatex
+          remarkPlugins={[remarkGfm, remarkMath]} 
+          rehypePlugins={[rehypeKatex]} 
           components={{
             code({ node, inline, className, children, ...props }: any) {
               const match = /language-(\w+)/.exec(className || '');
@@ -115,17 +121,17 @@ const MarkdownRenderer = ({
                 <CodeBlock language={match[1]} code={String(children).replace(/\n$/, '')} /> : 
                 <code className="bg-[#2c2d2e] text-orange-200 px-1.5 py-0.5 rounded-md text-[13px] font-mono border border-white/5 break-words whitespace-pre-wrap" {...props}>{children}</code>;
             },
-            p({ children }) { return <p className="mb-4 text-[15px] leading-7 text-gray-200">{children}</p>; },
-            ul({ children }) { return <ul className="list-disc pl-5 mb-4 space-y-2 text-gray-300 text-[15px] marker:text-gray-500">{children}</ul>; },
-            ol({ children }) { return <ol className="list-decimal pl-5 mb-4 space-y-2 text-gray-300 text-[15px] marker:text-gray-500">{children}</ol>; },
+            p({ children }) { return <p className="mb-4 text-[14px] md:text-[15px] leading-7 text-gray-200">{children}</p>; },
+            ul({ children }) { return <ul className="list-disc pl-5 mb-4 space-y-2 text-gray-300 text-[14px] md:text-[15px] marker:text-gray-500">{children}</ul>; },
+            ol({ children }) { return <ol className="list-decimal pl-5 mb-4 space-y-2 text-gray-300 text-[14px] md:text-[15px] marker:text-gray-500">{children}</ol>; },
             h1({ children }) { return <h1 className="text-xl md:text-2xl font-bold mb-4 text-white pb-2 border-b border-gray-700/50">{children}</h1>; },
             h2({ children }) { return <h2 className="text-lg md:text-xl font-bold mb-3 text-white mt-6">{children}</h2>; },
             h3({ children }) { return <h3 className="text-base md:text-lg font-bold mb-2 text-white mt-4">{children}</h3>; },
-            a({ children, href }) { return <a href={href} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 underline underline-offset-4 decoration-blue-400/30 hover:decoration-blue-400 transition-all">{children}</a>; },
+            a({ children, href }) { return <a href={href} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 underline underline-offset-4 decoration-blue-400/30 hover:decoration-blue-400 transition-all break-all">{children}</a>; },
             blockquote({ children }) { return <blockquote className="border-l-4 border-blue-500/30 pl-4 py-1 my-4 bg-blue-500/5 rounded-r-lg italic text-gray-400">{children}</blockquote>; },
-            table({ children }) { return <div className="overflow-x-auto my-4 rounded-lg border border-gray-700/50"><table className="min-w-full text-left text-sm text-gray-300">{children}</table></div>; },
-            th({ children }) { return <th className="bg-[#262729] p-3 font-semibold text-white border-b border-gray-700">{children}</th>; },
-            td({ children }) { return <td className="p-3 border-b border-gray-700/50">{children}</td>; },
+            table({ children }) { return <div className="overflow-x-auto my-4 rounded-lg border border-gray-700/50 custom-scrollbar"><table className="min-w-full text-left text-sm text-gray-300">{children}</table></div>; },
+            th({ children }) { return <th className="bg-[#262729] p-3 font-semibold text-white border-b border-gray-700 whitespace-nowrap">{children}</th>; },
+            td({ children }) { return <td className="p-3 border-b border-gray-700/50 min-w-[120px]">{children}</td>; },
           }}
         >
           {content}
@@ -135,10 +141,36 @@ const MarkdownRenderer = ({
   );
 };
 
+// 3. Status Screens (Pending / Banned)
+const StatusScreen = ({ icon, title, description, subtext, color }: any) => (
+  <div className="flex h-[100dvh] w-full items-center justify-center bg-[#050505] p-6 text-center animate-in fade-in zoom-in duration-500">
+    <div className="max-w-md w-full bg-[#0c0c0e] border border-white/10 rounded-2xl p-8 shadow-2xl flex flex-col items-center">
+      <div className={`w-20 h-20 rounded-full bg-${color}-500/10 flex items-center justify-center mb-6 border border-${color}-500/20`}>
+        {icon}
+      </div>
+      <h2 className="text-2xl font-bold text-white mb-3">{title}</h2>
+      <p className="text-gray-400 text-sm leading-relaxed mb-6">{description}</p>
+      
+      <div className="w-full bg-[#111] rounded-lg p-3 border border-white/5 mb-6">
+         <div className="flex items-center gap-2 justify-center mb-1">
+            <div className={`w-2 h-2 rounded-full bg-${color}-500 animate-pulse`} />
+            <span className={`text-xs font-bold uppercase tracking-widest text-${color}-400`}>Live Status</span>
+         </div>
+         <p className="text-[10px] text-gray-500">{subtext}</p>
+      </div>
+
+      <button onClick={() => signOut(auth)} className="flex items-center gap-2 px-6 py-2.5 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 hover:text-white text-sm font-medium transition-all">
+        <LogOut size={16} /> Sign Out
+      </button>
+    </div>
+  </div>
+);
+
 // --- MAIN APP ---
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [accountStatus, setAccountStatus] = useState<UserStatus>('loading');
   
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -173,16 +205,17 @@ export default function Home() {
 
   // 1. AUTH & INIT
   useEffect(() => {
+    // Standard Responsive Logic: Open sidebar by default only on large screens
     if (typeof window !== 'undefined') {
-        setSidebarOpen(window.innerWidth >= 1024);
+        setSidebarOpen(window.innerWidth >= 1280);
     }
 
     const unsubAuth = onAuthStateChanged(auth, async (currentUser) => {
       if (currentUser) {
-        
-        // --- ✅ CRITICAL FIX: ENSURE USER DATABASE ENTRY EXISTS ---
+        setUser(currentUser);
         const userRef = doc(db, 'users', currentUser.uid);
         
+        // --- ✅ CRITICAL FIX: ENSURE USER DATABASE ENTRY EXISTS ---
         try {
             const docSnap = await getDoc(userRef);
             if (!docSnap.exists()) {
@@ -191,13 +224,12 @@ export default function Home() {
                     email: currentUser.email,
                     displayName: currentUser.displayName || 'User',
                     photoURL: currentUser.photoURL,
-                    role: 'user', // Default Role
-                    status: 'approved', // Default Status
+                    role: 'user', 
+                    status: 'pending', // Default to pending so new users see pending screen
                     createdAt: serverTimestamp(),
                     lastLogin: serverTimestamp()
                 });
             } else {
-                // Update last login timestamp
                 await updateDoc(userRef, { lastLogin: serverTimestamp() });
             }
         } catch (err) {
@@ -205,24 +237,21 @@ export default function Home() {
         }
 
         // --- REAL-TIME SECURITY CHECK & ROLE SYNC ---
+        // Instead of alerting and forcing reload, we simply update state to show the specific screen
         const unsubUser = onSnapshot(userRef, (docSnap) => {
              const data = docSnap.data();
              if (data) {
-                 // Kick user if status is revoked (unless admin)
-                 if ((data.status === 'banned' || data.status === 'pending') && data.role !== 'admin') {
-                     alert("Access Revoked: Your account is pending approval or has been banned.");
-                     signOut(auth);
-                     window.location.reload();
-                     return;
-                 }
-                 // Store Role
                  setUserRole(data.role);
+                 // If user is admin, they are always approved
+                 if (data.role === 'admin') {
+                     setAccountStatus('approved');
+                 } else {
+                     setAccountStatus(data.status as UserStatus);
+                 }
              }
+             setAuthLoading(false);
         });
 
-        setUser(currentUser);
-        setAuthLoading(false);
-        
         // Load Session if exists
         const savedSessionId = localStorage.getItem('turboLastSession');
         if (savedSessionId) setCurrentSessionId(savedSessionId);
@@ -230,7 +259,9 @@ export default function Home() {
         // Load History List
         const q = query(collection(db, 'sessions'), where('userId', '==', currentUser.uid), orderBy('createdAt', 'desc'));
         const unsubSessions = onSnapshot(q, (snapshot) => {
-          setSessions(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Session)));
+          const fetchedSessions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Session));
+          // ✅ UPDATED: Filter out chats the user has "soft deleted"
+          setSessions(fetchedSessions.filter(s => !s.deletedByUser));
         });
 
         // Cleanup listeners
@@ -243,6 +274,7 @@ export default function Home() {
         setSessions([]); setGroqMessages([]); setGoogleMessages([]);
         localStorage.removeItem('turboLastSession');
         setUser(null);
+        setAccountStatus('loading'); // Reset status
         setAuthLoading(false);
       }
     });
@@ -251,7 +283,8 @@ export default function Home() {
 
   // 2. LOAD CHAT
   useEffect(() => {
-    if (currentSessionId && user) {
+    // Only load chat if status is approved
+    if (currentSessionId && user && accountStatus === 'approved') {
       setGroqMessages([]); setGoogleMessages([]); 
       const qGroq = query(collection(db, 'chats'), where('sessionId', '==', currentSessionId), where('provider', '==', 'groq'), orderBy('createdAt', 'asc'));
       const unsubGroq = onSnapshot(qGroq, (snapshot) => setGroqMessages(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Message))));
@@ -261,7 +294,7 @@ export default function Home() {
     } else {
       setGroqMessages([]); setGoogleMessages([]);
     }
-  }, [currentSessionId, user]);
+  }, [currentSessionId, user, accountStatus]);
 
   useEffect(() => { 
       if (!focusedProvider || focusedProvider === 'groq') groqEndRef.current?.scrollIntoView({ behavior: 'smooth' }); 
@@ -281,38 +314,26 @@ export default function Home() {
     setImage(null);
     stopSpeaking();
     setFocusedProvider(null);
-    if (window.innerWidth < 1024) setSidebarOpen(false);
+    if (window.innerWidth < 1280) setSidebarOpen(false);
   };
 
   const selectSession = (sessId: string) => {
     setCurrentSessionId(sessId);
     localStorage.setItem('turboLastSession', sessId);
-    if (window.innerWidth < 1024) setSidebarOpen(false);
+    if (window.innerWidth < 1280) setSidebarOpen(false);
   };
 
   const deleteSession = async (e: React.MouseEvent, sessId: string) => {
     e.stopPropagation();
-    if (!confirm("Delete this chat?")) return;
+    if (!confirm("Delete this chat from history?")) return;
     
     if (currentSessionId === sessId) startNewChat();
 
     try {
-      await deleteDoc(doc(db, 'sessions', sessId));
-      const q = query(collection(db, 'chats'), where('sessionId', '==', sessId));
-      const snapshot = await getDocs(q);
-      const BATCH_SIZE = 450;
-      let batch = writeBatch(db);
-      let count = 0;
-      for (const doc of snapshot.docs) {
-        batch.delete(doc.ref);
-        count++;
-        if (count >= BATCH_SIZE) {
-          await batch.commit();
-          batch = writeBatch(db); 
-          count = 0;
-        }
-      }
-      if (count > 0) await batch.commit();
+      // ✅ UPDATED: Soft Delete - Only update flag so user can't see it, but Admin can.
+      await updateDoc(doc(db, 'sessions', sessId), {
+          deletedByUser: true
+      });
     } catch (error) {
       console.error("Error deleting session:", error);
       alert("Failed to delete chat history.");
@@ -439,6 +460,9 @@ export default function Home() {
     stopSpeaking(); 
     setLoading(true);
     setInput('');
+    
+    // ✅ CAPTURE Base64 for Immediate UI/AI (Performance)
+    const localImageBase64 = image; 
     setImage(null);
 
     const controller = new AbortController();
@@ -449,7 +473,8 @@ export default function Home() {
       const docRef = await addDoc(collection(db, 'sessions'), {
         userId: user.uid,
         title: cleanInput.substring(0, 30) + (cleanInput.length > 30 ? '...' : '') || "Image Query",
-        createdAt: serverTimestamp()
+        createdAt: serverTimestamp(),
+        deletedByUser: false // ✅ UPDATED: Initialize soft delete flag
       });
       activeSessionId = docRef.id;
       setCurrentSessionId(activeSessionId);
@@ -457,17 +482,51 @@ export default function Home() {
     }
 
     const tempId = 'temp_user_' + Date.now();
-    const userMsg: Message = { id: tempId, role: 'user', content: cleanInput, image: image, provider: 'google' };
+    // ✅ UI UPDATE: Use Base64 immediately so user sees it instantly
+    const userMsg: Message = { id: tempId, role: 'user', content: cleanInput, image: localImageBase64, provider: 'google' };
 
     // Update Local State based on active mode
     if (!focusedProvider || focusedProvider === 'google') setGoogleMessages(prev => [...prev, userMsg]);
-    if (!focusedProvider || focusedProvider === 'groq') setGroqMessages(prev => [...prev, { ...userMsg, provider: 'groq' }]);
+    
+    // ✅ STRICT LOGIC: Do not update Groq state if image is present
+    if (!localImageBase64 && (!focusedProvider || focusedProvider === 'groq')) {
+        setGroqMessages(prev => [...prev, { ...userMsg, provider: 'groq' }]);
+    }
 
     const promises = [];
 
+    // --- 🚀 UPDATED: UPLOAD TO STORAGE LOGIC ---
+    let firestoreImageUrl = null;
+    
+    if (localImageBase64) {
+      try {
+        // 1. Create a reference: chat-images / UserID / SessionID / Timestamp
+        const storageRef = ref(storage, `chat-images/${user.uid}/${activeSessionId}/${Date.now()}.jpg`);
+        
+        // 2. Upload Base64 string directly
+        await uploadString(storageRef, localImageBase64, 'data_url');
+        
+        // 3. Get the scalable Download URL for Firestore
+        firestoreImageUrl = await getDownloadURL(storageRef);
+      } catch (uploadError) {
+        console.error("Image Upload Failed:", uploadError);
+        // Fallback: Use base64 or null if upload fails, to prevent crash
+        // For strict scalability we might default to null, but here we proceed.
+      }
+    }
+
     // Log user message to DB
-    promises.push(addDoc(collection(db, 'chats'), { sessionId: activeSessionId, role: 'user', content: cleanInput, image: image, provider: 'google', createdAt: serverTimestamp() }));
-    if (!focusedProvider) {
+    // ✅ UPDATED: Save 'firestoreImageUrl' (URL) instead of Base64 to Database
+    promises.push(addDoc(collection(db, 'chats'), { 
+        sessionId: activeSessionId, 
+        role: 'user', 
+        content: cleanInput, 
+        image: firestoreImageUrl, // Scalable URL
+        provider: 'google', 
+        createdAt: serverTimestamp() 
+    }));
+
+    if (!localImageBase64 && !focusedProvider) {
         promises.push(addDoc(collection(db, 'chats'), { sessionId: activeSessionId, role: 'user', content: cleanInput, provider: 'groq', createdAt: serverTimestamp() }));
     }
 
@@ -476,14 +535,15 @@ export default function Home() {
     // If Text Only: Both (or Focused)
     
     // 1. Google (Gemini) - Always runs if focused OR dual mode OR image present
-    if (image || !focusedProvider || focusedProvider === 'google') {
-        promises.push(streamAnswer('google', [...googleMessages, userMsg], activeSessionId!, controller.signal, image));
+    // ✅ SEND TO AI: Pass 'localImageBase64' (Speed)
+    if (localImageBase64 || !focusedProvider || focusedProvider === 'google') {
+        promises.push(streamAnswer('google', [...googleMessages, userMsg], activeSessionId!, controller.signal, localImageBase64));
     }
 
-    // 2. Groq (Llama) - Runs ONLY if NO image AND (focused OR dual mode)
-    if (!image && (!focusedProvider || focusedProvider === 'groq')) {
+    // 2. Groq (Llama) - STRICTLY ONLY if NO image AND (focused OR dual mode)
+    if (!localImageBase64 && (!focusedProvider || focusedProvider === 'groq')) {
         promises.push(streamAnswer('groq', [...groqMessages, { ...userMsg, provider: 'groq' }], activeSessionId!, controller.signal, null));
-    } else if (image && focusedProvider === 'groq') {
+    } else if (localImageBase64 && focusedProvider === 'groq') {
        // If user was focused on Groq but sent an image, we quietly switch to Gemini above
        // and update the focus state to avoid confusion
        setFocusedProvider('google');
@@ -495,11 +555,40 @@ export default function Home() {
     abortControllerRef.current = null;
   };
 
+  // --- RENDER LOGIC ---
+
   if (authLoading) return <div className="flex h-[100dvh] items-center justify-center bg-[#131314] text-white"><Cpu size={48} className="text-purple-500 animate-pulse" /></div>;
   if (!user) return <Login />;
 
+  // 🔴 BANNED STATE
+  if (accountStatus === 'banned') {
+      return (
+          <StatusScreen 
+              color="red"
+              icon={<ShieldAlert size={40} className="text-red-500" />}
+              title="Access Revoked"
+              description="Your account has been flagged and banned by the administrator."
+              subtext="You are currently locked out."
+          />
+      );
+  }
+
+  // 🟡 PENDING STATE
+  if (accountStatus === 'pending') {
+      return (
+          <StatusScreen 
+              color="yellow"
+              icon={<Clock size={40} className="text-yellow-500 animate-pulse" />}
+              title="Verification Pending"
+              description="Your account is waiting for administrator approval."
+              subtext="Wait here. This page will unlock automatically when approved."
+          />
+      );
+  }
+
+  // 🟢 APPROVED STATE (Normal Chat UI)
   return (
-    <div className="flex h-[100dvh] bg-[#131314] text-gray-100 font-sans overflow-hidden selection:bg-purple-500/30 selection:text-white">
+    <div className="flex h-[100dvh] bg-[#131314] text-gray-100 font-sans overflow-hidden selection:bg-purple-500/30 selection:text-white relative">
       
       {/* CAMERA MODAL */}
       {cameraMode && (
@@ -514,16 +603,16 @@ export default function Home() {
       {/* MOBILE OVERLAY */}
       {sidebarOpen && (
         <div 
-          className="fixed inset-0 bg-black/60 z-30 lg:hidden backdrop-blur-md animate-in fade-in duration-200"
+          className="fixed inset-0 bg-black/60 z-40 xl:hidden backdrop-blur-md animate-in fade-in duration-200"
           onClick={() => setSidebarOpen(false)}
         />
       )}
 
       {/* SIDEBAR */}
       <aside 
-        className={`fixed inset-y-0 left-0 z-40 bg-[#1e1f20] border-r border-white/5 flex flex-col transition-all duration-300 ease-in-out shadow-2xl
-          lg:static lg:z-auto
-          ${sidebarOpen ? 'translate-x-0 w-[280px]' : '-translate-x-full lg:translate-x-0 lg:w-0 lg:border-none'} 
+        className={`fixed inset-y-0 left-0 z-50 bg-[#1e1f20] border-r border-white/5 flex flex-col transition-all duration-300 ease-in-out shadow-2xl
+          xl:static xl:z-auto
+          ${sidebarOpen ? 'translate-x-0 w-[280px]' : '-translate-x-full xl:translate-x-0 xl:w-0 xl:border-none'} 
           overflow-hidden whitespace-nowrap
         `}
       >
@@ -536,7 +625,7 @@ export default function Home() {
             >
               <Menu size={20} />
             </button>
-            <span className="text-sm font-bold text-gray-200 px-2 lg:block hidden tracking-wide">TurboLearn</span>
+            <span className="text-sm font-bold text-gray-200 px-2 xl:block hidden tracking-wide">TurboLearn</span>
           </div>
 
           {/* NEW: Admin Portal Button (Only visible if role is 'admin') */}
@@ -566,7 +655,7 @@ export default function Home() {
                 </div>
                 <button 
                     onClick={(e) => deleteSession(e, sess.id)} 
-                    className="opacity-100 lg:opacity-0 lg:group-hover:opacity-100 hover:text-red-400 p-1.5 transition-opacity"
+                    className="opacity-100 xl:opacity-0 xl:group-hover:opacity-100 hover:text-red-400 p-1.5 transition-opacity"
                     title="Delete Chat"
                 >
                     <Trash2 size={14} />
@@ -588,13 +677,13 @@ export default function Home() {
       {/* MAIN CONTENT */}
       <main className="flex-1 flex flex-col h-[100dvh] relative bg-[#131314] w-full min-w-0">
         
-        {/* HEADER (Floating) */}
-        <div className="flex-none h-16 flex items-center px-4 z-20 absolute top-0 w-full bg-transparent pointer-events-none">
-          {/* Header content only visible when standard view, otherwise hidden to not obstruct focus mode */}
-          <div className={`flex items-center w-full pointer-events-auto ${focusedProvider ? 'hidden' : ''}`}>
+        {/* HEADER (Floating with high Z-index for menu access) */}
+        <div className="flex-none h-16 flex items-center px-4 z-50 absolute top-0 w-full bg-transparent pointer-events-none">
+          {/* Header content: Pointer events auto enabled specifically for buttons */}
+          <div className={`flex items-center w-full ${focusedProvider ? 'hidden' : ''}`}>
             <button 
               onClick={() => setSidebarOpen(true)} 
-              className={`p-2 text-gray-400 hover:bg-[#2c2d2e]/80 hover:text-white rounded-full transition-colors mr-3 active:scale-95 backdrop-blur-sm ${sidebarOpen ? 'lg:hidden opacity-0 pointer-events-none' : 'opacity-100'}`}
+              className={`p-2 text-gray-400 hover:bg-[#2c2d2e]/80 hover:text-white rounded-full transition-colors mr-3 active:scale-95 backdrop-blur-md bg-black/20 pointer-events-auto ${sidebarOpen ? 'xl:hidden opacity-0' : 'opacity-100'}`}
             >
               <Menu size={24} />
             </button>
@@ -602,7 +691,7 @@ export default function Home() {
             {!currentSessionId && groqMessages.length === 0 && <span className="text-base md:text-lg font-medium text-gray-500 mx-auto pointer-events-none tracking-tight opacity-50">TurboLearn AI</span>}
             
             {isSpeaking && (
-              <button onClick={stopSpeaking} className="ml-auto flex items-center gap-2 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 backdrop-blur-md text-red-400 px-4 py-1.5 rounded-full shadow-lg transition-all animate-pulse text-xs font-bold z-50">
+              <button onClick={stopSpeaking} className="ml-auto flex items-center gap-2 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 backdrop-blur-md text-red-400 px-4 py-1.5 rounded-full shadow-lg transition-all animate-pulse text-xs font-bold z-50 pointer-events-auto">
                 <VolumeX size={14} /> <span className="hidden md:inline">Stop Reading</span>
               </button>
             )}
@@ -611,14 +700,14 @@ export default function Home() {
 
         {/* CHAT SCROLL AREA */}
         <div className="flex-1 overflow-y-auto custom-scrollbar p-3 md:p-6 pb-0 pt-16">
-          <div className={`mx-auto h-full pb-40 transition-all duration-300 ${focusedProvider ? 'max-w-5xl' : (sidebarOpen ? 'max-w-6xl grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6' : 'max-w-7xl grid grid-cols-1 lg:grid-cols-2 gap-6')}`}>
+          <div className={`mx-auto h-full pb-32 md:pb-40 transition-all duration-300 ${focusedProvider ? 'max-w-5xl' : (sidebarOpen ? 'max-w-6xl grid grid-cols-1 xl:grid-cols-2 gap-4 md:gap-6' : 'max-w-7xl grid grid-cols-1 xl:grid-cols-2 gap-6')}`}>
             
             {/* GROQ CARD */}
             {(!focusedProvider || focusedProvider === 'groq') && (
               <div className={`flex flex-col rounded-2xl bg-[#1e1f20] border border-[#2c2d2e] shadow-xl relative overflow-hidden transition-all duration-300
-                ${focusedProvider === 'groq' ? 'h-full border-orange-500/30 shadow-[0_0_50px_rgba(249,115,22,0.1)]' : 'min-h-[40vh] lg:min-h-0'}
+                ${focusedProvider === 'groq' ? 'h-full border-orange-500/30 shadow-[0_0_50px_rgba(249,115,22,0.1)]' : 'min-h-[40vh] h-full xl:h-auto'}
               `}>
-                <div className="flex items-center justify-between px-5 py-3 bg-[#1e1f20]/90 backdrop-blur-sm border-b border-[#2c2d2e] sticky top-0 z-10">
+                <div className="flex items-center justify-between px-3 py-2 md:px-5 md:py-3 bg-[#1e1f20]/90 backdrop-blur-sm border-b border-[#2c2d2e] sticky top-0 z-10">
                   <div className="flex items-center gap-2">
                     {focusedProvider === 'groq' && <button onClick={() => setFocusedProvider(null)}><ArrowLeft size={18} className="text-gray-400 hover:text-white mr-2" /></button>}
                     <Cpu size={16} className="text-orange-400" />
@@ -632,7 +721,7 @@ export default function Home() {
                     {focusedProvider === 'groq' ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
                   </button>
                 </div>
-                <div className="flex-1 p-4 md:p-5 overflow-y-auto custom-scrollbar">
+                <div className="flex-1 p-3 md:p-5 overflow-y-auto custom-scrollbar">
                   {!currentSessionId && groqMessages.length === 0 && <div className="h-40 md:h-full flex flex-col gap-2 items-center justify-center text-gray-700 opacity-40"><Cpu size={48} /><span className="text-xs font-medium">Ready</span></div>}
                   {groqMessages.map((m, i) => (
                     <div key={i} className={`mb-6 flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
@@ -651,9 +740,9 @@ export default function Home() {
             {/* GEMINI CARD */}
             {(!focusedProvider || focusedProvider === 'google') && (
               <div className={`flex flex-col rounded-2xl bg-[#1e1f20] border border-[#2c2d2e] shadow-xl overflow-hidden transition-all duration-300
-                ${focusedProvider === 'google' ? 'h-full border-blue-500/30 shadow-[0_0_50px_rgba(59,130,246,0.1)]' : 'min-h-[40vh] lg:min-h-0'}
+                ${focusedProvider === 'google' ? 'h-full border-blue-500/30 shadow-[0_0_50px_rgba(59,130,246,0.1)]' : 'min-h-[40vh] h-full xl:h-auto'}
               `}>
-                <div className="flex items-center justify-between px-5 py-3 bg-[#1e1f20]/90 backdrop-blur-sm border-b border-[#2c2d2e] sticky top-0 z-10">
+                <div className="flex items-center justify-between px-3 py-2 md:px-5 md:py-3 bg-[#1e1f20]/90 backdrop-blur-sm border-b border-[#2c2d2e] sticky top-0 z-10">
                   <div className="flex items-center gap-2">
                     {focusedProvider === 'google' && <button onClick={() => setFocusedProvider(null)}><ArrowLeft size={18} className="text-gray-400 hover:text-white mr-2" /></button>}
                     <Sparkles size={16} className="text-blue-400" />
@@ -667,7 +756,7 @@ export default function Home() {
                     {focusedProvider === 'google' ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
                   </button>
                 </div>
-                <div className="flex-1 p-4 md:p-5 overflow-y-auto custom-scrollbar">
+                <div className="flex-1 p-3 md:p-5 overflow-y-auto custom-scrollbar">
                   {!currentSessionId && googleMessages.length === 0 && <div className="h-40 md:h-full flex flex-col gap-2 items-center justify-center text-gray-700 opacity-40"><Sparkles size={48} /><span className="text-xs font-medium">Ready</span></div>}
                   {googleMessages.map((m, i) => (
                     <div key={i} className={`mb-6 flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
@@ -706,7 +795,7 @@ export default function Home() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 placeholder={isListening ? "Listening..." : focusedProvider ? `Talk to ${focusedProvider === 'groq' ? 'Llama' : 'Gemini'}...` : "Ask anything or scan..."}
-                className={`w-full bg-[#1e1f20]/80 backdrop-blur-xl text-gray-100 placeholder-gray-500 rounded-full py-4 pl-36 pr-28 
+                className={`w-full bg-[#1e1f20]/80 backdrop-blur-xl text-gray-100 placeholder-gray-500 rounded-full py-3 md:py-4 pl-24 md:pl-36 pr-20 md:pr-28 
                   focus:outline-none focus:bg-[#1e1f20] focus:ring-1 focus:ring-white/10 focus:shadow-[0_0_20px_rgba(0,0,0,0.5)] 
                   transition-all text-[15px] border border-[#2c2d2e] shadow-xl
                   ${isListening ? 'border-red-500/50 bg-red-900/10' : ''}`}
@@ -714,23 +803,23 @@ export default function Home() {
               />
               
               {/* LEFT ACTIONS (Media) */}
-              <div className="absolute left-2 top-2 bottom-2 flex items-center gap-1 bg-[#2c2d2e]/50 rounded-full px-1 backdrop-blur-sm border border-white/5">
-                <button type="button" onClick={() => fileInputRef.current?.click()} className="p-2 text-gray-400 hover:text-white rounded-full transition-colors hover:bg-white/10" title="Upload Image"><ImageIcon size={18} /></button>
+              <div className="absolute left-2 top-2 bottom-2 flex items-center gap-0 md:gap-1 bg-[#2c2d2e]/50 rounded-full px-1 backdrop-blur-sm border border-white/5">
+                <button type="button" onClick={() => fileInputRef.current?.click()} className="p-1.5 md:p-2 text-gray-400 hover:text-white rounded-full transition-colors hover:bg-white/10" title="Upload Image"><ImageIcon size={18} /></button>
                 <input type="file" ref={fileInputRef} onChange={handleImageUpload} accept="image/*" className="hidden" />
-                <div className="w-[1px] h-4 bg-white/10"></div>
-                <button type="button" onClick={() => setCameraMode('capture')} className="p-2 text-gray-400 hover:text-blue-400 rounded-full transition-colors hover:bg-white/10" title="Take Photo"><Camera size={18} /></button>
-                <button type="button" onClick={() => setCameraMode('scan')} className="p-2 text-gray-400 hover:text-green-400 rounded-full transition-colors hover:bg-white/10" title="Scan Text (Lens)"><ScanText size={18} /></button>
+                <div className="w-[1px] h-3 md:h-4 bg-white/10 my-auto"></div>
+                <button type="button" onClick={() => setCameraMode('capture')} className="p-1.5 md:p-2 text-gray-400 hover:text-blue-400 rounded-full transition-colors hover:bg-white/10" title="Take Photo"><Camera size={18} /></button>
+                <button type="button" onClick={() => setCameraMode('scan')} className="p-1.5 md:p-2 text-gray-400 hover:text-green-400 rounded-full transition-colors hover:bg-white/10" title="Scan Text (Lens)"><ScanText size={18} /></button>
               </div>
 
               {/* RIGHT ACTIONS (Voice/Send) */}
-              <div className="absolute right-2 top-2 bottom-2 flex items-center gap-2">
-                <button type="button" onClick={toggleVoiceInput} className={`p-2.5 rounded-full transition-all active:scale-90 ${isListening ? 'text-white bg-red-500 animate-pulse shadow-lg shadow-red-500/30' : 'text-gray-400 hover:text-white hover:bg-white/10'}`}>
+              <div className="absolute right-2 top-2 bottom-2 flex items-center gap-1 md:gap-2">
+                <button type="button" onClick={toggleVoiceInput} className={`p-2 md:p-2.5 rounded-full transition-all active:scale-90 ${isListening ? 'text-white bg-red-500 animate-pulse shadow-lg shadow-red-500/30' : 'text-gray-400 hover:text-white hover:bg-white/10'}`}>
                   <Mic size={20} />
                 </button>
                 <button 
                   type={loading ? 'button' : 'submit'} 
                   onClick={loading ? stopGenerating : undefined} 
-                  className={`p-2.5 rounded-full transition-all active:scale-90 shadow-lg ${loading ? 'bg-white text-black' : 'bg-[#2c2d2e] text-white hover:bg-[#3c3d3e] disabled:opacity-50 disabled:bg-transparent disabled:shadow-none'}`} 
+                  className={`p-2 md:p-2.5 rounded-full transition-all active:scale-90 shadow-lg ${loading ? 'bg-white text-black' : 'bg-[#2c2d2e] text-white hover:bg-[#3c3d3e] disabled:opacity-50 disabled:bg-transparent disabled:shadow-none'}`} 
                   disabled={(!input.trim() && !image) && !loading}
                 >
                   {loading ? <StopCircle size={20} fill="currentColor" /> : <Terminal size={20} />}

@@ -4,11 +4,11 @@ import { useState, useEffect, useMemo } from 'react';
 import { 
   Users, MessageSquare, CheckCircle, Trash2, Search, LogOut, 
   Ban, Eye, X, Shield, ImageIcon, Terminal, Clock, 
-  BarChart3, Download, Filter, AlertCircle, Activity
+  BarChart3, Download, Filter, AlertCircle, Activity, Copy, Archive, Loader2
 } from 'lucide-react';
 import { auth, db } from '@/lib/firebase';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
-import { collection, query, where, orderBy, onSnapshot, doc, updateDoc, deleteDoc, getDocs } from 'firebase/firestore';
+import { collection, query, where, orderBy, onSnapshot, doc, updateDoc, deleteDoc, getDocs, writeBatch } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
 import Login from '@/components/Login';
 
@@ -25,23 +25,25 @@ type UserData = {
 };
 
 type ChatSession = {
-    id: string;
-    title: string;
-    createdAt: any;
+   id: string;
+   title: string;
+   createdAt: any;
+   deletedByUser?: boolean;
 };
 
 type ChatMessage = {
-    role: 'user' | 'assistant';
-    content: string;
-    image?: string | null;
-    provider?: string;
-    createdAt: any;
+   role: 'user' | 'assistant';
+   content: string;
+   image?: string | null;
+   provider?: string;
+   createdAt: any;
 };
 
 export default function AdminPortal() {
   const [user, setUser] = useState<any>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [processingAction, setProcessingAction] = useState(false); // New state for delete loading
   const router = useRouter();
 
   // Admin Data
@@ -99,7 +101,7 @@ export default function AdminPortal() {
     return () => unsub();
   }, [isAdmin]);
 
-  // 3. COMPUTED METRICS (For Dashboard)
+  // 3. COMPUTED METRICS
   const metrics = useMemo(() => {
     return {
         total: users.length,
@@ -116,10 +118,49 @@ export default function AdminPortal() {
     catch (e) { alert("Failed to update status."); }
   };
 
+  // ✅ DEEP DELETE USER (NUKE)
   const deleteUser = async (uid: string) => {
-    if(!confirm("⚠️ Permanently delete this user? This cannot be undone.")) return;
-    try { await deleteDoc(doc(db, 'users', uid)); } 
-    catch (e) { alert("Failed to delete user."); }
+    if(!confirm("⚠️ PERMANENTLY DELETE USER & ALL DATA?\n\nThis will wipe:\n1. User Profile\n2. ALL Chat Sessions\n3. ALL Message History\n\nIf they login again, they will be a brand new user.\n\nAre you sure?")) return;
+    
+    setProcessingAction(true);
+    try {
+        // 1. Find all sessions for this user
+        const sessionsQuery = query(collection(db, 'sessions'), where('userId', '==', uid));
+        const sessionsSnapshot = await getDocs(sessionsQuery);
+
+        // 2. Loop through sessions and delete their chats
+        // We use Promise.all to speed up the sub-collection deletion
+        const deletionPromises = sessionsSnapshot.docs.map(async (sessionDoc) => {
+            const chatsQuery = query(collection(db, 'chats'), where('sessionId', '==', sessionDoc.id));
+            const chatsSnapshot = await getDocs(chatsQuery);
+            
+            // Delete all chats in this session
+            const chatDeletes = chatsSnapshot.docs.map(chatDoc => deleteDoc(chatDoc.ref));
+            await Promise.all(chatDeletes);
+
+            // Delete the session document itself
+            return deleteDoc(sessionDoc.ref);
+        });
+
+        await Promise.all(deletionPromises);
+
+        // 3. Finally, delete the user profile
+        await deleteDoc(doc(db, 'users', uid));
+
+        alert("User and all associated history have been permanently expunged.");
+        // If we were inspecting this user, clear the view
+        if (selectedUserForChat?.uid === uid) {
+            setSelectedUserForChat(null);
+            setUserSessions([]);
+            setChatLogs([]);
+        }
+
+    } catch (e) {
+        console.error("Error deleting user:", e);
+        alert("Failed to fully delete user. Check console for details.");
+    } finally {
+        setProcessingAction(false);
+    }
   };
 
   const exportToCSV = () => {
@@ -182,6 +223,45 @@ export default function AdminPortal() {
       }
   };
 
+  // ✅ PERMANENT DELETE SESSION
+  const deleteSessionPermanently = async (sessionId: string) => {
+      if(!confirm("⚠️ PERMANENTLY DELETE RECORD?\n\nThis will completely wipe the session and all its messages from the database.\n\nEven Admins cannot recover this.")) return;
+      
+      try {
+          // 1. Delete all messages in the session
+          const chatsQuery = query(collection(db, 'chats'), where('sessionId', '==', sessionId));
+          const chatsSnapshot = await getDocs(chatsQuery);
+          const batch = writeBatch(db);
+          
+          chatsSnapshot.docs.forEach((doc) => {
+              batch.delete(doc.ref);
+          });
+
+          // 2. Delete the session document itself
+          batch.delete(doc(db, 'sessions', sessionId));
+
+          await batch.commit();
+
+          // 3. UI Update
+          setUserSessions(prev => prev.filter(s => s.id !== sessionId));
+          if (activeSessionId === sessionId) {
+              setActiveSessionId(null);
+              setChatLogs([]);
+          }
+          alert("Record permanently expunged.");
+      } catch (err) {
+          console.error(err);
+          alert("Failed to delete records.");
+      }
+  };
+
+  // ✅ COPY TRANSCRIPT
+  const copyTranscript = () => {
+      const text = chatLogs.map(m => `[${m.role.toUpperCase()}]: ${m.content}`).join('\n\n');
+      navigator.clipboard.writeText(text);
+      alert("Transcript copied to clipboard.");
+  };
+
   if (loading) return <div className="min-h-screen bg-[#09090b] text-white flex items-center justify-center font-mono">Loading Portal...</div>;
   if (!user || !isAdmin) return <Login />;
 
@@ -194,8 +274,17 @@ export default function AdminPortal() {
   });
 
   return (
-    <div className="flex h-screen bg-[#09090b] text-gray-100 font-sans overflow-hidden">
+    <div className="flex h-screen bg-[#09090b] text-gray-100 font-sans overflow-hidden relative">
       
+      {/* Processing Overlay */}
+      {processingAction && (
+        <div className="absolute inset-0 bg-black/80 z-50 flex items-center justify-center flex-col gap-4 backdrop-blur-sm">
+            <Loader2 size={48} className="text-red-500 animate-spin" />
+            <div className="text-white font-bold text-lg">Scrubbing Database...</div>
+            <div className="text-gray-400 text-sm">Removing user, sessions, and messages permanently.</div>
+        </div>
+      )}
+
       {/* SIDEBAR */}
       <aside className="w-64 border-r border-white/10 bg-[#0c0c0e] flex flex-col shadow-2xl z-20">
         <div className="p-6 border-b border-white/5">
@@ -227,7 +316,6 @@ export default function AdminPortal() {
         </nav>
 
         <div className="p-4 border-t border-white/5">
-            {/* Removed "Return to App" as requested */}
             <button onClick={() => signOut(auth)} className="w-full flex items-center gap-2 px-4 py-3 text-xs font-semibold text-red-400 hover:text-red-300 rounded-lg hover:bg-red-500/10 transition-colors">
                 <LogOut size={14} /> Secure Logout
             </button>
@@ -252,11 +340,9 @@ export default function AdminPortal() {
             
             {activeTab === 'users' && (
                 <div className="flex items-center gap-4">
-                     {/* Export Button */}
-                    <button onClick={exportToCSV} className="flex items-center gap-2 text-xs font-medium text-gray-400 hover:text-white transition-colors bg-white/5 px-3 py-1.5 rounded-md border border-white/10 hover:bg-white/10">
+                     <button onClick={exportToCSV} className="flex items-center gap-2 text-xs font-medium text-gray-400 hover:text-white transition-colors bg-white/5 px-3 py-1.5 rounded-md border border-white/10 hover:bg-white/10">
                         <Download size={14} /> Export CSV
                     </button>
-                    {/* Filter Status */}
                     <div className="relative group">
                         <div className="flex items-center gap-2 bg-[#18181b] border border-white/10 rounded-full px-4 py-1.5 text-xs text-white">
                             <Filter size={12} className="text-gray-500" />
@@ -272,7 +358,6 @@ export default function AdminPortal() {
                             </select>
                         </div>
                     </div>
-                    {/* Search */}
                     <div className="relative">
                         <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
                         <input 
@@ -293,7 +378,6 @@ export default function AdminPortal() {
             {/* 0. DASHBOARD TAB */}
             {activeTab === 'dashboard' && (
                 <div className="max-w-6xl mx-auto space-y-6">
-                    {/* Metric Cards */}
                     <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                         <div className="bg-[#0c0c0e] p-5 rounded-xl border border-white/5 shadow-lg relative overflow-hidden group">
                             <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity"><Users size={64} /></div>
@@ -321,7 +405,6 @@ export default function AdminPortal() {
                         </div>
                     </div>
 
-                    {/* Quick Actions / Recent Pending */}
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                         <div className="bg-[#0c0c0e] rounded-xl border border-white/5 overflow-hidden shadow-lg flex flex-col">
                             <div className="p-4 border-b border-white/5 bg-white/[0.02] flex items-center gap-2">
@@ -434,7 +517,7 @@ export default function AdminPortal() {
                                             )}
                                             
                                             {u.role !== 'admin' && (
-                                                <button onClick={() => deleteUser(u.uid)} className="p-2 text-red-400 hover:bg-red-500/10 rounded-md transition-colors" title="Delete"><Trash2 size={16} /></button>
+                                                <button onClick={() => deleteUser(u.uid)} className="p-2 text-red-400 hover:bg-red-500/10 rounded-md transition-colors" title="Delete User & Data"><Trash2 size={16} /></button>
                                             )}
                                         </div>
                                     </td>
@@ -451,7 +534,7 @@ export default function AdminPortal() {
                     {/* Session List */}
                     <div className="w-80 bg-[#0c0c0e] rounded-xl border border-white/5 overflow-hidden flex flex-col shadow-xl">
                         <div className="p-4 border-b border-white/5 bg-white/[0.02] font-medium text-xs text-gray-400 uppercase tracking-widest flex justify-between items-center">
-                            <span>{selectedUserForChat ? selectedUserForChat.displayName : 'Select User'}</span>
+                            <span className="truncate">{selectedUserForChat ? selectedUserForChat.displayName : 'Select User'}</span>
                             {selectedUserForChat && <button onClick={() => setSelectedUserForChat(null)} className="text-gray-500 hover:text-white"><X size={14}/></button>}
                         </div>
                         <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
@@ -468,23 +551,59 @@ export default function AdminPortal() {
                                 <div 
                                     key={sess.id} 
                                     onClick={() => loadChatLogs(sess.id)}
-                                    className={`p-3 rounded-lg cursor-pointer text-sm transition-all border ${activeSessionId === sess.id ? 'bg-blue-500/10 border-blue-500/30 text-blue-200' : 'bg-transparent border-transparent text-gray-400 hover:bg-white/5'}`}
+                                    className={`group p-3 rounded-lg cursor-pointer text-sm transition-all border relative ${activeSessionId === sess.id ? 'bg-blue-500/10 border-blue-500/30 text-blue-200' : 'bg-transparent border-transparent text-gray-400 hover:bg-white/5'}`}
                                 >
-                                    <div className="font-medium truncate">{sess.title}</div>
-                                    <div className="text-[10px] opacity-50 mt-1 font-mono flex items-center gap-1">
-                                        <Clock size={10} />
-                                        {sess.createdAt?.toDate ? new Date(sess.createdAt.toDate()).toLocaleDateString() : ''}
+                                    <div className="flex justify-between items-start">
+                                        <div className="font-medium truncate pr-2">{sess.title}</div>
+                                        {/* PERMANENT DELETE BUTTON */}
+                                        <button 
+                                            onClick={(e) => { e.stopPropagation(); deleteSessionPermanently(sess.id); }}
+                                            className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-400 transition-opacity"
+                                            title="Permanently Delete Session"
+                                        >
+                                            <Trash2 size={12} />
+                                        </button>
+                                    </div>
+                                    <div className="flex justify-between items-end mt-1">
+                                        <div className="text-[10px] opacity-50 font-mono flex items-center gap-1">
+                                            <Clock size={10} />
+                                            {sess.createdAt?.toDate ? new Date(sess.createdAt.toDate()).toLocaleDateString() : ''}
+                                        </div>
+                                        {/* USER DELETED INDICATOR */}
+                                        {sess.deletedByUser && (
+                                            <span className="text-[9px] bg-red-900/30 text-red-400 border border-red-500/20 px-1.5 py-0.5 rounded uppercase font-bold tracking-wider">
+                                                User Deleted
+                                            </span>
+                                        )}
                                     </div>
                                 </div>
                             ))}
                         </div>
                     </div>
 
-                    {/* Chat Logs with Image Support */}
+                    {/* Chat Logs */}
                     <div className="flex-1 bg-[#0c0c0e] rounded-xl border border-white/5 overflow-hidden flex flex-col shadow-xl">
-                        <div className="p-4 border-b border-white/5 bg-white/[0.02] font-medium text-xs text-gray-400 uppercase tracking-widest">
-                             Transcript View
+                        <div className="p-4 border-b border-white/5 bg-white/[0.02] flex justify-between items-center">
+                             <div className="font-medium text-xs text-gray-400 uppercase tracking-widest flex items-center gap-2">
+                                <span>Transcript View</span>
+                                {activeSessionId && userSessions.find(s => s.id === activeSessionId)?.deletedByUser && (
+                                    <span className="text-red-500 flex items-center gap-1 bg-red-900/10 px-2 py-0.5 rounded border border-red-500/20">
+                                        <Archive size={12} /> DELETED BY USER
+                                    </span>
+                                )}
+                             </div>
+                             {activeSessionId && (
+                                 <div className="flex items-center gap-2">
+                                     <button onClick={copyTranscript} className="text-xs flex items-center gap-1 text-gray-400 hover:text-white px-2 py-1 hover:bg-white/5 rounded transition-colors">
+                                         <Copy size={12} /> Copy
+                                     </button>
+                                     <button onClick={() => deleteSessionPermanently(activeSessionId)} className="text-xs flex items-center gap-1 text-red-400 hover:text-red-300 px-2 py-1 hover:bg-red-500/10 rounded transition-colors border border-red-500/20">
+                                         <Trash2 size={12} /> Delete Record
+                                     </button>
+                                 </div>
+                             )}
                         </div>
+                        
                         <div className="flex-1 overflow-y-auto p-6 space-y-8 custom-scrollbar bg-[#050505]">
                             {!activeSessionId && <div className="flex h-full items-center justify-center text-gray-600 text-xs uppercase tracking-widest">Select a session to inspect</div>}
                             
