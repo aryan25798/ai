@@ -1,15 +1,27 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
+// ✅ Added imports for Markdown rendering
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math'; 
+import rehypeKatex from 'rehype-katex'; 
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import 'katex/dist/katex.min.css'; 
+
 import { 
   Users, MessageSquare, CheckCircle, Trash2, Search, LogOut, 
   Ban, Eye, X, Shield, ImageIcon, Terminal, Clock, 
-  BarChart3, Download, Filter, AlertCircle, Activity, Copy, Archive, Loader2
+  BarChart3, Download, Filter, AlertCircle, Activity, Copy, Archive, Loader2, ChevronDown
 } from 'lucide-react';
 import { auth, db } from '@/lib/firebase';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
-import { collection, query, where, orderBy, onSnapshot, doc, updateDoc, deleteDoc, getDocs, writeBatch } from 'firebase/firestore';
-import { useRouter } from 'next/navigation';
+import { 
+  collection, query, where, orderBy, onSnapshot, doc, updateDoc, deleteDoc, getDocs, writeBatch, 
+  limit, startAfter, getCountFromServer, QueryDocumentSnapshot, DocumentData, getDoc 
+} from 'firebase/firestore';
+import { useRouter, useSearchParams } from 'next/navigation';
 import Login from '@/components/Login';
 
 // --- TYPES ---
@@ -39,17 +51,90 @@ type ChatMessage = {
    createdAt: any;
 };
 
+// --- COMPONENTS (REUSED FROM MAIN PAGE) ---
+
+const CodeBlock = ({ language, code }: { language: string, code: string }) => {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = () => {
+    navigator.clipboard.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div className="my-2 rounded-lg overflow-hidden bg-[#1e1f20] border border-[#2c2d2e] w-full">
+      <div className="flex justify-between items-center bg-[#262729] px-3 py-1.5 border-b border-[#2c2d2e]">
+        <span className="text-[10px] uppercase font-bold text-gray-400">{language || 'text'}</span>
+        <button onClick={handleCopy} className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-white">
+          {copied ? <CheckCircle size={10} /> : <Copy size={10} />} {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+      <div className="overflow-x-auto">
+        <SyntaxHighlighter 
+          language={language?.toLowerCase() || 'text'} 
+          style={vscDarkPlus} 
+          PreTag="div" 
+          customStyle={{ margin: 0, padding: '0.75rem', fontSize: '12px' }}
+        >
+          {code}
+        </SyntaxHighlighter>
+      </div>
+    </div>
+  );
+};
+
+const AdminMarkdownRenderer = ({ content }: { content: string }) => {
+  return (
+    <div className="prose prose-invert max-w-none text-sm leading-relaxed">
+      <ReactMarkdown 
+        remarkPlugins={[remarkGfm, remarkMath]} 
+        rehypePlugins={[rehypeKatex]} 
+        components={{
+          code({ node, inline, className, children, ...props }: any) {
+            const match = /language-(\w+)/.exec(className || '');
+            return !inline && match ? 
+              <CodeBlock language={match[1]} code={String(children).replace(/\n$/, '')} /> : 
+              <code className="bg-[#2c2d2e] text-orange-200 px-1 py-0.5 rounded text-[12px]" {...props}>{children}</code>;
+          },
+          p({ children }) { return <p className="mb-2 last:mb-0">{children}</p>; },
+          ul({ children }) { return <ul className="list-disc pl-4 mb-2">{children}</ul>; },
+          ol({ children }) { return <ol className="list-decimal pl-4 mb-2">{children}</ol>; },
+          a({ children, href }) { return <a href={href} target="_blank" className="text-blue-400 underline">{children}</a>; }
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+};
+
 export default function AdminPortal() {
   const [user, setUser] = useState<any>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [processingAction, setProcessingAction] = useState(false); // New state for delete loading
+  const [processingAction, setProcessingAction] = useState(false); 
   const router = useRouter();
+  const searchParams = useSearchParams();
 
-  // Admin Data
+  // Admin Data with Pagination
   const [users, setUsers] = useState<UserData[]>([]);
+  const [lastVisible, setLastVisible] = useState<QueryDocumentSnapshot<DocumentData> | null>(null);
+  const [fetchingUsers, setFetchingUsers] = useState(false);
+  const [hasMoreUsers, setHasMoreUsers] = useState(true);
+  
+  // Metrics State
+  const [serverMetrics, setServerMetrics] = useState({
+      total: 0,
+      active: 0,
+      pending: 0,
+      banned: 0,
+      admins: 0
+  });
+
   const [search, setSearch] = useState('');
   const [filterStatus, setFilterStatus] = useState<'all' | 'pending' | 'approved' | 'banned'>('all');
+  
+  // Tabs & Navigation State
   const [activeTab, setActiveTab] = useState<'dashboard' | 'users' | 'chats'>('dashboard');
 
   // Chat Inspector State
@@ -58,16 +143,53 @@ export default function AdminPortal() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [chatLogs, setChatLogs] = useState<ChatMessage[]>([]);
 
-  // 1. AUTH CHECK
+  // 1. AUTH CHECK & STATE RESTORATION
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (currentUser) => {
       if (currentUser) {
         const docRef = doc(db, 'users', currentUser.uid);
-        onSnapshot(docRef, (docSnap) => {
+        onSnapshot(docRef, async (docSnap) => {
              const data = docSnap.data();
              if (data && data.role === 'admin') {
                  setUser(currentUser);
                  setIsAdmin(true);
+                 
+                 // --- RESTORE STATE FROM URL ---
+                 const tabParam = searchParams.get('tab');
+                 const uidParam = searchParams.get('uid');
+                 const sessionParam = searchParams.get('sessionId');
+
+                 if (tabParam === 'users' || tabParam === 'chats' || tabParam === 'dashboard') {
+                     setActiveTab(tabParam);
+                 }
+
+                 // If we are in 'chats' and have a UID, load that user's sessions
+                 if (tabParam === 'chats' && uidParam) {
+                     try {
+                         const userDoc = await getDoc(doc(db, 'users', uidParam));
+                         if (userDoc.exists()) {
+                             const targetUser = { uid: userDoc.id, ...userDoc.data() } as UserData;
+                             setSelectedUserForChat(targetUser);
+                             
+                             // Fetch sessions for this user
+                             const q = query(collection(db, 'sessions'), where('userId', '==', targetUser.uid), orderBy('createdAt', 'desc'));
+                             const snap = await getDocs(q);
+                             const fetchedSessions = snap.docs.map(d => ({ id: d.id, ...d.data() } as ChatSession));
+                             setUserSessions(fetchedSessions);
+
+                             // If we also have a Session ID, load that chat
+                             if (sessionParam) {
+                                 setActiveSessionId(sessionParam);
+                                 // Fetch chat logs
+                                 const qLogs = query(collection(db, 'chats'), where('sessionId', '==', sessionParam), orderBy('createdAt', 'asc'));
+                                 const snapLogs = await getDocs(qLogs);
+                                 setChatLogs(snapLogs.docs.map(d => d.data() as ChatMessage));
+                             }
+                         }
+                     } catch (err) {
+                         console.error("Error restoring state:", err);
+                     }
+                 }
              } else {
                  router.push('/');
              }
@@ -78,89 +200,228 @@ export default function AdminPortal() {
       }
     });
     return () => unsub();
-  }, [router]);
+  }, []); 
 
-  // 2. FETCH ALL USERS
-  useEffect(() => {
-    if (!isAdmin) return;
-    const q = collection(db, 'users');
-    const unsub = onSnapshot(q, (snapshot) => {
-      const fetchedUsers = snapshot.docs.map(d => ({
-          uid: d.id, 
-          ...d.data()
-      } as UserData));
+  // 2. FETCH USERS (PAGINATED)
+  const USERS_PER_PAGE = 20;
+
+  const fetchUsers = async (reset = false) => {
+      if (!isAdmin || (fetchingUsers && !reset)) return;
       
-      fetchedUsers.sort((a, b) => {
-          const timeA = a.createdAt?.seconds || 0;
-          const timeB = b.createdAt?.seconds || 0;
-          return timeB - timeA; 
-      });
+      setFetchingUsers(true);
+      try {
+          let q = query(
+              collection(db, 'users'), 
+              orderBy('createdAt', 'desc'), 
+              limit(USERS_PER_PAGE)
+          );
 
-      setUsers(fetchedUsers);
-    }, (error) => console.error("🔥 Admin Fetch Error:", error));
-    return () => unsub();
-  }, [isAdmin]);
+          if (filterStatus !== 'all') {
+              q = query(
+                  collection(db, 'users'), 
+                  where('status', '==', filterStatus),
+                  orderBy('createdAt', 'desc'), 
+                  limit(USERS_PER_PAGE)
+              );
+          }
 
-  // 3. COMPUTED METRICS
-  const metrics = useMemo(() => {
-    return {
-        total: users.length,
-        active: users.filter(u => u.status === 'approved').length,
-        pending: users.filter(u => u.status === 'pending').length,
-        banned: users.filter(u => u.status === 'banned').length,
-        admins: users.filter(u => u.role === 'admin').length,
-    };
-  }, [users]);
+          if (!reset && lastVisible) {
+              q = query(q, startAfter(lastVisible));
+          }
 
-  // 4. ACTIONS
+          const snapshot = await getDocs(q);
+          
+          const fetchedUsers = snapshot.docs.map(d => ({
+              uid: d.id, 
+              ...d.data()
+          } as UserData));
+
+          setLastVisible(snapshot.docs[snapshot.docs.length - 1] || null);
+          setHasMoreUsers(snapshot.docs.length === USERS_PER_PAGE);
+
+          if (reset) {
+              setUsers(fetchedUsers);
+          } else {
+              setUsers(prev => [...prev, ...fetchedUsers]);
+          }
+      } catch (error) {
+          console.error("Error fetching users:", error);
+      } finally {
+          setFetchingUsers(false);
+      }
+  };
+
+  // 3. FETCH METRICS
+  const fetchMetrics = async () => {
+      if (!isAdmin) return;
+      try {
+          const coll = collection(db, 'users');
+          const snapshotTotal = await getCountFromServer(coll);
+          const snapshotActive = await getCountFromServer(query(coll, where('status', '==', 'approved')));
+          const snapshotPending = await getCountFromServer(query(coll, where('status', '==', 'pending')));
+          const snapshotBanned = await getCountFromServer(query(coll, where('status', '==', 'banned')));
+          const snapshotAdmins = await getCountFromServer(query(coll, where('role', '==', 'admin')));
+
+          setServerMetrics({
+              total: snapshotTotal.data().count,
+              active: snapshotActive.data().count,
+              pending: snapshotPending.data().count,
+              banned: snapshotBanned.data().count,
+              admins: snapshotAdmins.data().count
+          });
+      } catch (error) {
+          console.error("Error fetching metrics:", error);
+      }
+  };
+
+  useEffect(() => {
+      if (isAdmin) {
+          fetchUsers(true);
+          fetchMetrics();
+      }
+  }, [isAdmin, filterStatus]);
+
+  // 4. NAVIGATION & ACTIONS
+  const handleSwitchTab = (tab: 'dashboard' | 'users' | 'chats') => {
+      setActiveTab(tab);
+      const params = new URLSearchParams(searchParams.toString());
+      params.set('tab', tab);
+      if (tab !== 'chats') {
+          params.delete('uid');
+          params.delete('sessionId');
+      }
+      router.push(`?${params.toString()}`);
+  };
+
+  const handleCloseInspector = () => {
+      setSelectedUserForChat(null);
+      setActiveSessionId(null);
+      const params = new URLSearchParams(searchParams.toString());
+      params.delete('uid');
+      params.delete('sessionId');
+      router.push(`?${params.toString()}`);
+  };
+
+  const loadUserSessions = async (targetUser: UserData) => {
+      setSelectedUserForChat(targetUser);
+      setActiveSessionId(null);
+      setChatLogs([]);
+      setActiveTab('chats');
+
+      const params = new URLSearchParams(searchParams.toString());
+      params.set('tab', 'chats');
+      params.set('uid', targetUser.uid);
+      params.delete('sessionId'); 
+      router.push(`?${params.toString()}`);
+
+      try {
+        const q = query(collection(db, 'sessions'), where('userId', '==', targetUser.uid), orderBy('createdAt', 'desc'));
+        const snap = await getDocs(q);
+        setUserSessions(snap.docs.map(d => ({ id: d.id, ...d.data() } as ChatSession)));
+      } catch (e) {
+          const q2 = query(collection(db, 'sessions'), where('userId', '==', targetUser.uid));
+          const snap2 = await getDocs(q2);
+          const sessions = snap2.docs.map(d => ({ id: d.id, ...d.data() } as ChatSession));
+          sessions.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+          setUserSessions(sessions);
+      }
+  };
+
+  const loadChatLogs = async (sessionId: string) => {
+      setActiveSessionId(sessionId);
+      const params = new URLSearchParams(searchParams.toString());
+      params.set('sessionId', sessionId);
+      router.push(`?${params.toString()}`);
+
+      try {
+        const q = query(collection(db, 'chats'), where('sessionId', '==', sessionId), orderBy('createdAt', 'asc'));
+        const snap = await getDocs(q);
+        setChatLogs(snap.docs.map(d => d.data() as ChatMessage));
+      } catch (e) {
+          const q2 = query(collection(db, 'chats'), where('sessionId', '==', sessionId));
+          const snap2 = await getDocs(q2);
+          const chats = snap2.docs.map(d => d.data() as ChatMessage);
+          chats.sort((a, b) => (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0));
+          setChatLogs(chats);
+      }
+  };
+
   const updateUserStatus = async (uid: string, status: 'approved' | 'banned' | 'pending') => {
-    try { await updateDoc(doc(db, 'users', uid), { status }); } 
+    try { 
+        await updateDoc(doc(db, 'users', uid), { status }); 
+        setUsers(prev => prev.map(u => u.uid === uid ? { ...u, status } : u));
+        fetchMetrics();
+    } 
     catch (e) { alert("Failed to update status."); }
   };
 
-  // ✅ DEEP DELETE USER (NUKE)
   const deleteUser = async (uid: string) => {
     if(!confirm("⚠️ PERMANENTLY DELETE USER & ALL DATA?\n\nThis will wipe:\n1. User Profile\n2. ALL Chat Sessions\n3. ALL Message History\n\nIf they login again, they will be a brand new user.\n\nAre you sure?")) return;
     
     setProcessingAction(true);
     try {
-        // 1. Find all sessions for this user
-        const sessionsQuery = query(collection(db, 'sessions'), where('userId', '==', uid));
-        const sessionsSnapshot = await getDocs(sessionsQuery);
-
-        // 2. Loop through sessions and delete their chats
-        // We use Promise.all to speed up the sub-collection deletion
-        const deletionPromises = sessionsSnapshot.docs.map(async (sessionDoc) => {
-            const chatsQuery = query(collection(db, 'chats'), where('sessionId', '==', sessionDoc.id));
-            const chatsSnapshot = await getDocs(chatsQuery);
-            
-            // Delete all chats in this session
-            const chatDeletes = chatsSnapshot.docs.map(chatDoc => deleteDoc(chatDoc.ref));
-            await Promise.all(chatDeletes);
-
-            // Delete the session document itself
-            return deleteDoc(sessionDoc.ref);
+        const response = await fetch('/api/admin/delete-user', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uid, adminUid: user.uid })
         });
 
-        await Promise.all(deletionPromises);
+        const result = await response.json();
 
-        // 3. Finally, delete the user profile
-        await deleteDoc(doc(db, 'users', uid));
-
-        alert("User and all associated history have been permanently expunged.");
-        // If we were inspecting this user, clear the view
-        if (selectedUserForChat?.uid === uid) {
-            setSelectedUserForChat(null);
-            setUserSessions([]);
-            setChatLogs([]);
+        if (!response.ok) {
+            throw new Error(result.error || 'Failed to delete user');
         }
 
-    } catch (e) {
+        alert("User and all associated history have been permanently expunged.");
+        setUsers(prev => prev.filter(u => u.uid !== uid));
+        fetchMetrics();
+
+        if (selectedUserForChat?.uid === uid) {
+            handleCloseInspector();
+        }
+
+    } catch (e: any) {
         console.error("Error deleting user:", e);
-        alert("Failed to fully delete user. Check console for details.");
+        alert(`Failed to delete user: ${e.message}`);
     } finally {
         setProcessingAction(false);
     }
+  };
+
+  const deleteSessionPermanently = async (sessionId: string) => {
+      if(!confirm("⚠️ PERMANENTLY DELETE RECORD?\n\nThis will completely wipe the session and all its messages from the database.\n\nEven Admins cannot recover this.")) return;
+      
+      try {
+          const chatsQuery = query(collection(db, 'chats'), where('sessionId', '==', sessionId));
+          const chatsSnapshot = await getDocs(chatsQuery);
+          const batch = writeBatch(db);
+          
+          chatsSnapshot.docs.forEach((doc) => {
+              batch.delete(doc.ref);
+          });
+
+          batch.delete(doc(db, 'sessions', sessionId));
+          await batch.commit();
+
+          setUserSessions(prev => prev.filter(s => s.id !== sessionId));
+          if (activeSessionId === sessionId) {
+              setActiveSessionId(null);
+              setChatLogs([]);
+              const params = new URLSearchParams(searchParams.toString());
+              params.delete('sessionId');
+              router.push(`?${params.toString()}`);
+          }
+          alert("Record permanently expunged.");
+      } catch (err) {
+          console.error(err);
+          alert("Failed to delete records.");
+      }
+  };
+
+  const copyTranscript = () => {
+      const text = chatLogs.map(m => `[${m.role.toUpperCase()}]: ${m.content}`).join('\n\n');
+      navigator.clipboard.writeText(text);
+      alert("Transcript copied to clipboard.");
   };
 
   const exportToCSV = () => {
@@ -186,86 +447,9 @@ export default function AdminPortal() {
     document.body.removeChild(link);
   };
 
-  // 5. CHAT LOGIC
-  const loadUserSessions = async (targetUser: UserData) => {
-      setSelectedUserForChat(targetUser);
-      setActiveSessionId(null);
-      setChatLogs([]);
-      try {
-        const q = query(collection(db, 'sessions'), where('userId', '==', targetUser.uid), orderBy('createdAt', 'desc'));
-        const snap = await getDocs(q);
-        setUserSessions(snap.docs.map(d => ({ id: d.id, ...d.data() } as ChatSession)));
-        setActiveTab('chats');
-      } catch (e) {
-          // Fallback if index missing
-          const q2 = query(collection(db, 'sessions'), where('userId', '==', targetUser.uid));
-          const snap2 = await getDocs(q2);
-          const sessions = snap2.docs.map(d => ({ id: d.id, ...d.data() } as ChatSession));
-          sessions.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
-          setUserSessions(sessions);
-          setActiveTab('chats');
-      }
-  };
-
-  const loadChatLogs = async (sessionId: string) => {
-      setActiveSessionId(sessionId);
-      try {
-        const q = query(collection(db, 'chats'), where('sessionId', '==', sessionId), orderBy('createdAt', 'asc'));
-        const snap = await getDocs(q);
-        setChatLogs(snap.docs.map(d => d.data() as ChatMessage));
-      } catch (e) {
-          // Fallback if index missing
-          const q2 = query(collection(db, 'chats'), where('sessionId', '==', sessionId));
-          const snap2 = await getDocs(q2);
-          const chats = snap2.docs.map(d => d.data() as ChatMessage);
-          chats.sort((a, b) => (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0));
-          setChatLogs(chats);
-      }
-  };
-
-  // ✅ PERMANENT DELETE SESSION
-  const deleteSessionPermanently = async (sessionId: string) => {
-      if(!confirm("⚠️ PERMANENTLY DELETE RECORD?\n\nThis will completely wipe the session and all its messages from the database.\n\nEven Admins cannot recover this.")) return;
-      
-      try {
-          // 1. Delete all messages in the session
-          const chatsQuery = query(collection(db, 'chats'), where('sessionId', '==', sessionId));
-          const chatsSnapshot = await getDocs(chatsQuery);
-          const batch = writeBatch(db);
-          
-          chatsSnapshot.docs.forEach((doc) => {
-              batch.delete(doc.ref);
-          });
-
-          // 2. Delete the session document itself
-          batch.delete(doc(db, 'sessions', sessionId));
-
-          await batch.commit();
-
-          // 3. UI Update
-          setUserSessions(prev => prev.filter(s => s.id !== sessionId));
-          if (activeSessionId === sessionId) {
-              setActiveSessionId(null);
-              setChatLogs([]);
-          }
-          alert("Record permanently expunged.");
-      } catch (err) {
-          console.error(err);
-          alert("Failed to delete records.");
-      }
-  };
-
-  // ✅ COPY TRANSCRIPT
-  const copyTranscript = () => {
-      const text = chatLogs.map(m => `[${m.role.toUpperCase()}]: ${m.content}`).join('\n\n');
-      navigator.clipboard.writeText(text);
-      alert("Transcript copied to clipboard.");
-  };
-
   if (loading) return <div className="min-h-screen bg-[#09090b] text-white flex items-center justify-center font-mono">Loading Portal...</div>;
   if (!user || !isAdmin) return <Login />;
 
-  // Filter Logic
   const filteredUsers = users.filter(u => {
     const matchesSearch = (u.email || '').toLowerCase().includes(search.toLowerCase()) || 
                           (u.displayName || '').toLowerCase().includes(search.toLowerCase());
@@ -280,8 +464,8 @@ export default function AdminPortal() {
       {processingAction && (
         <div className="absolute inset-0 bg-black/80 z-50 flex items-center justify-center flex-col gap-4 backdrop-blur-sm">
             <Loader2 size={48} className="text-red-500 animate-spin" />
-            <div className="text-white font-bold text-lg">Scrubbing Database...</div>
-            <div className="text-gray-400 text-sm">Removing user, sessions, and messages permanently.</div>
+            <div className="text-white font-bold text-lg">Server-Side Deletion in Progress...</div>
+            <div className="text-gray-400 text-sm">Recursively removing user data via secure API.</div>
         </div>
       )}
 
@@ -296,19 +480,19 @@ export default function AdminPortal() {
         
         <nav className="flex-1 p-4 space-y-2">
             <button 
-                onClick={() => setActiveTab('dashboard')}
+                onClick={() => handleSwitchTab('dashboard')}
                 className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-all ${activeTab === 'dashboard' ? 'bg-orange-500/10 text-orange-400 border border-orange-500/20' : 'text-gray-400 hover:bg-white/5'}`}
             >
                 <BarChart3 size={18} /> Dashboard
             </button>
             <button 
-                onClick={() => { setActiveTab('users'); setSelectedUserForChat(null); }}
+                onClick={() => { handleSwitchTab('users'); handleCloseInspector(); }}
                 className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-all ${activeTab === 'users' ? 'bg-red-500/10 text-red-400 border border-red-500/20' : 'text-gray-400 hover:bg-white/5'}`}
             >
                 <Users size={18} /> User Management
             </button>
             <button 
-                onClick={() => setActiveTab('chats')}
+                onClick={() => handleSwitchTab('chats')}
                 className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-all ${activeTab === 'chats' ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20' : 'text-gray-400 hover:bg-white/5'}`}
             >
                 <MessageSquare size={18} /> Chat Inspector
@@ -373,7 +557,7 @@ export default function AdminPortal() {
         </header>
 
         {/* CONTENT AREA */}
-        <div className="flex-1 overflow-y-auto p-6">
+        <div className="flex-1 overflow-y-auto p-6" id="scroll-container">
             
             {/* 0. DASHBOARD TAB */}
             {activeTab === 'dashboard' && (
@@ -382,25 +566,25 @@ export default function AdminPortal() {
                         <div className="bg-[#0c0c0e] p-5 rounded-xl border border-white/5 shadow-lg relative overflow-hidden group">
                             <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity"><Users size={64} /></div>
                             <div className="text-gray-500 text-xs font-bold uppercase tracking-widest mb-1">Total Users</div>
-                            <div className="text-3xl font-bold text-white">{metrics.total}</div>
+                            <div className="text-3xl font-bold text-white">{serverMetrics.total}</div>
                             <div className="text-[10px] text-gray-600 mt-2">Registered Accounts</div>
                         </div>
                         <div className="bg-[#0c0c0e] p-5 rounded-xl border border-white/5 shadow-lg relative overflow-hidden group">
                             <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity"><CheckCircle size={64} className="text-green-500" /></div>
                             <div className="text-green-500/70 text-xs font-bold uppercase tracking-widest mb-1">Active Users</div>
-                            <div className="text-3xl font-bold text-green-400">{metrics.active}</div>
+                            <div className="text-3xl font-bold text-green-400">{serverMetrics.active}</div>
                             <div className="text-[10px] text-gray-600 mt-2">Approved Access</div>
                         </div>
                         <div className="bg-[#0c0c0e] p-5 rounded-xl border border-yellow-500/20 shadow-lg relative overflow-hidden group">
                             <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity"><AlertCircle size={64} className="text-yellow-500" /></div>
                             <div className="text-yellow-500/70 text-xs font-bold uppercase tracking-widest mb-1">Pending</div>
-                            <div className="text-3xl font-bold text-yellow-400">{metrics.pending}</div>
+                            <div className="text-3xl font-bold text-yellow-400">{serverMetrics.pending}</div>
                             <div className="text-[10px] text-gray-600 mt-2">Action Required</div>
                         </div>
                          <div className="bg-[#0c0c0e] p-5 rounded-xl border border-red-500/20 shadow-lg relative overflow-hidden group">
                             <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity"><Ban size={64} className="text-red-500" /></div>
                             <div className="text-red-500/70 text-xs font-bold uppercase tracking-widest mb-1">Banned</div>
-                            <div className="text-3xl font-bold text-red-400">{metrics.banned}</div>
+                            <div className="text-3xl font-bold text-red-400">{serverMetrics.banned}</div>
                             <div className="text-[10px] text-gray-600 mt-2">Access Revoked</div>
                         </div>
                     </div>
@@ -423,27 +607,13 @@ export default function AdminPortal() {
                                     <AlertCircle size={14} className="text-yellow-400" />
                                     <span className="text-xs font-bold uppercase tracking-widest text-gray-400">Pending Approvals</span>
                                 </div>
-                                <button onClick={() => setActiveTab('users')} className="text-[10px] text-blue-400 hover:underline">View All</button>
+                                <button onClick={() => handleSwitchTab('users')} className="text-[10px] text-blue-400 hover:underline">View All</button>
                             </div>
                             <div className="flex-1 overflow-y-auto max-h-64 p-2">
-                                {users.filter(u => u.status === 'pending').length === 0 ? (
+                                {serverMetrics.pending === 0 ? (
                                     <div className="flex h-full items-center justify-center text-gray-600 text-xs py-8">No pending requests.</div>
                                 ) : (
-                                    users.filter(u => u.status === 'pending').slice(0, 5).map(u => (
-                                        <div key={u.uid} className="flex items-center justify-between p-3 hover:bg-white/5 rounded-lg transition-colors border-b border-white/5 last:border-none">
-                                            <div className="flex items-center gap-3">
-                                                 <div className="w-8 h-8 rounded-md bg-white/10 flex items-center justify-center text-xs font-bold">{u.email?.[0]?.toUpperCase()}</div>
-                                                 <div>
-                                                     <div className="text-xs text-white font-medium">{u.displayName}</div>
-                                                     <div className="text-[10px] text-gray-500">{u.email}</div>
-                                                 </div>
-                                            </div>
-                                            <div className="flex gap-2">
-                                                <button onClick={() => updateUserStatus(u.uid, 'approved')} className="p-1.5 text-green-400 hover:bg-green-500/10 rounded transition-colors"><CheckCircle size={14} /></button>
-                                                <button onClick={() => updateUserStatus(u.uid, 'banned')} className="p-1.5 text-red-400 hover:bg-red-500/10 rounded transition-colors"><Ban size={14} /></button>
-                                            </div>
-                                        </div>
-                                    ))
+                                    <div className="text-center p-4 text-xs text-gray-500">Check User Management tab for pending users.</div>
                                 )}
                             </div>
                         </div>
@@ -453,78 +623,93 @@ export default function AdminPortal() {
 
             {/* 1. USER MANAGEMENT TAB */}
             {activeTab === 'users' && (
-                <div className="bg-[#0c0c0e] rounded-xl border border-white/5 overflow-hidden shadow-2xl">
-                    <table className="w-full text-left border-collapse">
-                        <thead>
-                            <tr className="border-b border-white/5 bg-white/[0.02] text-[10px] uppercase tracking-widest text-gray-500">
-                                <th className="p-4 pl-6">User</th>
-                                <th className="p-4">Role</th>
-                                <th className="p-4">Status</th>
-                                <th className="p-4">Joined</th>
-                                <th className="p-4 text-right pr-6">Controls</th>
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y divide-white/5">
-                            {filteredUsers.length === 0 && (
-                                <tr>
-                                    <td colSpan={5} className="p-8 text-center text-gray-500 text-sm">
-                                        No users found matching filters.
-                                    </td>
+                <div className="bg-[#0c0c0e] rounded-xl border border-white/5 overflow-hidden shadow-2xl flex flex-col h-full">
+                    <div className="flex-1 overflow-y-auto">
+                        <table className="w-full text-left border-collapse">
+                            <thead>
+                                <tr className="border-b border-white/5 bg-white/[0.02] text-[10px] uppercase tracking-widest text-gray-500 sticky top-0 z-10 backdrop-blur-md">
+                                    <th className="p-4 pl-6">User</th>
+                                    <th className="p-4">Role</th>
+                                    <th className="p-4">Status</th>
+                                    <th className="p-4">Joined</th>
+                                    <th className="p-4 text-right pr-6">Controls</th>
                                 </tr>
-                            )}
-                            {filteredUsers.map((u) => (
-                                <tr key={u.uid} className="hover:bg-white/[0.02] transition-colors group">
-                                    <td className="p-4 pl-6">
-                                        <div className="flex items-center gap-3">
-                                            {u.photoURL ? (
-                                                <img src={u.photoURL} className="w-9 h-9 rounded-md border border-white/10" />
-                                            ) : (
-                                                <div className="w-9 h-9 rounded-md bg-white/5 flex items-center justify-center text-gray-400 font-bold border border-white/10">
-                                                    {u.email?.[0]?.toUpperCase() || '?'}
+                            </thead>
+                            <tbody className="divide-y divide-white/5">
+                                {filteredUsers.length === 0 && (
+                                    <tr>
+                                        <td colSpan={5} className="p-8 text-center text-gray-500 text-sm">
+                                            No users found matching filters.
+                                        </td>
+                                    </tr>
+                                )}
+                                {filteredUsers.map((u) => (
+                                    <tr key={u.uid} className="hover:bg-white/[0.02] transition-colors group">
+                                        <td className="p-4 pl-6">
+                                            <div className="flex items-center gap-3">
+                                                {u.photoURL ? (
+                                                    <img src={u.photoURL} className="w-9 h-9 rounded-md border border-white/10" />
+                                                ) : (
+                                                    <div className="w-9 h-9 rounded-md bg-white/5 flex items-center justify-center text-gray-400 font-bold border border-white/10">
+                                                        {u.email?.[0]?.toUpperCase() || '?'}
+                                                    </div>
+                                                )}
+                                                <div>
+                                                    <div className="font-medium text-white text-sm group-hover:text-red-400 transition-colors">{u.displayName || 'No Name'}</div>
+                                                    <div className="text-[11px] text-gray-500 font-mono">{u.email}</div>
                                                 </div>
-                                            )}
-                                            <div>
-                                                <div className="font-medium text-white text-sm group-hover:text-red-400 transition-colors">{u.displayName || 'No Name'}</div>
-                                                <div className="text-[11px] text-gray-500 font-mono">{u.email}</div>
                                             </div>
-                                        </div>
-                                    </td>
-                                    <td className="p-4 text-xs text-gray-400 font-mono">
-                                        {u.role === 'admin' ? <span className="text-red-400 font-bold bg-red-900/10 px-2 py-0.5 rounded">ADMIN</span> : 'User'}
-                                    </td>
-                                    <td className="p-4">
-                                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide border ${
-                                            u.status === 'approved' ? 'bg-green-900/20 text-green-400 border-green-500/20' :
-                                            u.status === 'banned' ? 'bg-red-900/20 text-red-400 border-red-500/20' :
-                                            'bg-yellow-900/20 text-yellow-400 border-yellow-500/20 animate-pulse'
-                                        }`}>
-                                            {u.status}
-                                        </span>
-                                    </td>
-                                    <td className="p-4 text-xs text-gray-500">
-                                        {u.createdAt?.toDate ? new Date(u.createdAt.toDate()).toLocaleDateString() : 'Unknown'}
-                                    </td>
-                                    <td className="p-4 text-right pr-6">
-                                        <div className="flex items-center justify-end gap-2 opacity-50 group-hover:opacity-100 transition-opacity">
-                                            <button onClick={() => loadUserSessions(u)} className="p-2 text-blue-400 hover:bg-blue-500/10 rounded-md transition-colors" title="View Chat History"><Eye size={16} /></button>
-                                            
-                                            {u.status !== 'approved' && (
-                                                <button onClick={() => updateUserStatus(u.uid, 'approved')} className="p-2 text-green-400 hover:bg-green-500/10 rounded-md transition-colors" title="Approve"><CheckCircle size={16} /></button>
-                                            )}
-                                            
-                                            {u.status !== 'banned' && u.role !== 'admin' && (
-                                                <button onClick={() => updateUserStatus(u.uid, 'banned')} className="p-2 text-orange-400 hover:bg-orange-500/10 rounded-md transition-colors" title="Ban User"><Ban size={16} /></button>
-                                            )}
-                                            
-                                            {u.role !== 'admin' && (
-                                                <button onClick={() => deleteUser(u.uid)} className="p-2 text-red-400 hover:bg-red-500/10 rounded-md transition-colors" title="Delete User & Data"><Trash2 size={16} /></button>
-                                            )}
-                                        </div>
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
+                                        </td>
+                                        <td className="p-4 text-xs text-gray-400 font-mono">
+                                            {u.role === 'admin' ? <span className="text-red-400 font-bold bg-red-900/10 px-2 py-0.5 rounded">ADMIN</span> : 'User'}
+                                        </td>
+                                        <td className="p-4">
+                                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide border ${
+                                                u.status === 'approved' ? 'bg-green-900/20 text-green-400 border-green-500/20' :
+                                                u.status === 'banned' ? 'bg-red-900/20 text-red-400 border-red-500/20' :
+                                                'bg-yellow-900/20 text-yellow-400 border-yellow-500/20 animate-pulse'
+                                            }`}>
+                                                {u.status}
+                                            </span>
+                                        </td>
+                                        <td className="p-4 text-xs text-gray-500">
+                                            {u.createdAt?.toDate ? new Date(u.createdAt.toDate()).toLocaleDateString() : 'Unknown'}
+                                        </td>
+                                        <td className="p-4 text-right pr-6">
+                                            <div className="flex items-center justify-end gap-2 opacity-50 group-hover:opacity-100 transition-opacity">
+                                                <button onClick={() => loadUserSessions(u)} className="p-2 text-blue-400 hover:bg-blue-500/10 rounded-md transition-colors" title="View Chat History"><Eye size={16} /></button>
+                                                
+                                                {u.status !== 'approved' && (
+                                                    <button onClick={() => updateUserStatus(u.uid, 'approved')} className="p-2 text-green-400 hover:bg-green-500/10 rounded-md transition-colors" title="Approve"><CheckCircle size={16} /></button>
+                                                )}
+                                                
+                                                {u.status !== 'banned' && u.role !== 'admin' && (
+                                                    <button onClick={() => updateUserStatus(u.uid, 'banned')} className="p-2 text-orange-400 hover:bg-orange-500/10 rounded-md transition-colors" title="Ban User"><Ban size={16} /></button>
+                                                )}
+                                                
+                                                {u.role !== 'admin' && (
+                                                    <button onClick={() => deleteUser(u.uid)} className="p-2 text-red-400 hover:bg-red-500/10 rounded-md transition-colors" title="Delete User & Data"><Trash2 size={16} /></button>
+                                                )}
+                                            </div>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                    {/* Load More Button */}
+                    {hasMoreUsers && !search && (
+                        <div className="p-4 border-t border-white/5 flex justify-center bg-[#0c0c0e]">
+                            <button 
+                                onClick={() => fetchUsers()} 
+                                disabled={fetchingUsers}
+                                className="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 rounded-full text-xs text-gray-300 transition-colors disabled:opacity-50"
+                            >
+                                {fetchingUsers ? <Loader2 size={14} className="animate-spin" /> : <ChevronDown size={14} />}
+                                {fetchingUsers ? 'Loading...' : 'Load More Users'}
+                            </button>
+                        </div>
+                    )}
                 </div>
             )}
 
@@ -535,7 +720,7 @@ export default function AdminPortal() {
                     <div className="w-80 bg-[#0c0c0e] rounded-xl border border-white/5 overflow-hidden flex flex-col shadow-xl">
                         <div className="p-4 border-b border-white/5 bg-white/[0.02] font-medium text-xs text-gray-400 uppercase tracking-widest flex justify-between items-center">
                             <span className="truncate">{selectedUserForChat ? selectedUserForChat.displayName : 'Select User'}</span>
-                            {selectedUserForChat && <button onClick={() => setSelectedUserForChat(null)} className="text-gray-500 hover:text-white"><X size={14}/></button>}
+                            {selectedUserForChat && <button onClick={handleCloseInspector} className="text-gray-500 hover:text-white"><X size={14}/></button>}
                         </div>
                         <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
                             {!selectedUserForChat && (
@@ -629,8 +814,8 @@ export default function AdminPortal() {
                                             </div>
                                         )}
 
-                                        {/* Text Content */}
-                                        <div className="whitespace-pre-wrap">{msg.content || <span className="italic opacity-50">No text content</span>}</div>
+                                        {/* Text Content (WITH MARKDOWN) */}
+                                        <AdminMarkdownRenderer content={msg.content || ""} />
                                     </div>
                                 </div>
                             ))}

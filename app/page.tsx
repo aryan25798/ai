@@ -12,12 +12,12 @@ import 'katex/dist/katex.min.css';
 import { 
   Copy, Check, Terminal, Cpu, Sparkles, Plus, MessageSquare, Trash2, LogIn, LogOut, Menu, X, User as UserIcon, 
   Image as ImageIcon, Mic, Volume2, StopCircle, VolumeX, Camera, ScanText, Maximize2, Minimize2, ArrowLeft, Shield,
-  Clock, ShieldAlert, Loader2, Lock
+  Clock, ShieldAlert, Loader2, Lock, History
 } from 'lucide-react';
 import { db, auth, storage } from '@/lib/firebase';
 import { signOut, onAuthStateChanged, User } from 'firebase/auth';
 import { 
-  collection, addDoc, query, where, orderBy, onSnapshot, serverTimestamp, deleteDoc, doc, getDocs, writeBatch, getDoc, setDoc, updateDoc 
+  collection, addDoc, query, where, orderBy, onSnapshot, serverTimestamp, deleteDoc, doc, getDocs, writeBatch, getDoc, setDoc, updateDoc, Unsubscribe
 } from 'firebase/firestore';
 import { ref, uploadString, getDownloadURL } from 'firebase/storage';
 import Login from '@/components/Login';
@@ -41,7 +41,6 @@ type Session = {
   deletedByUser?: boolean;
 };
 
-// New Status Type to handle UI switching
 type UserStatus = 'loading' | 'approved' | 'pending' | 'banned' | 'new';
 
 // --- UTILS ---
@@ -83,7 +82,7 @@ const CodeBlock = ({ language, code }: { language: string, code: string }) => {
   );
 };
 
-// 2. Markdown Renderer (Industry Grade & Responsive)
+// 2. Markdown Renderer
 const MarkdownRenderer = ({ 
   content, 
   msgId, 
@@ -141,7 +140,7 @@ const MarkdownRenderer = ({
   );
 };
 
-// 3. Status Screens (Pending / Banned)
+// 3. Status Screens
 const StatusScreen = ({ icon, title, description, subtext, color }: any) => (
   <div className="flex h-[100dvh] w-full items-center justify-center bg-[#050505] p-6 text-center animate-in fade-in zoom-in duration-500">
     <div className="max-w-md w-full bg-[#0c0c0e] border border-white/10 rounded-2xl p-8 shadow-2xl flex flex-col items-center">
@@ -179,7 +178,7 @@ export default function Home() {
   // Focus Mode State
   const [focusedProvider, setFocusedProvider] = useState<'groq' | 'google' | null>(null);
 
-  // User Role State (For Admin Portal Access)
+  // User Role State
   const [userRole, setUserRole] = useState<'user' | 'admin' | null>(null);
 
   // Media & Tools
@@ -203,19 +202,26 @@ export default function Home() {
   const googleEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
+  // ✅ 1. LISTENER REFS: Store unsubscribe functions here to clear them on logout
+  const unsubUserRef = useRef<Unsubscribe | null>(null);
+  const unsubSessionsRef = useRef<Unsubscribe | null>(null);
+
   // 1. AUTH & INIT
   useEffect(() => {
-    // Standard Responsive Logic: Open sidebar by default only on large screens
+    // Gemini-like behavior: Sidebar open on large screens by default
     if (typeof window !== 'undefined') {
-        setSidebarOpen(window.innerWidth >= 1280);
+        setSidebarOpen(window.innerWidth >= 1024); // lg breakpoint
     }
 
     const unsubAuth = onAuthStateChanged(auth, async (currentUser) => {
+      // ✅ CLEANUP PREVIOUS LISTENERS IMMEDIATELY (Prevents Permission Denied Error)
+      if (unsubUserRef.current) { unsubUserRef.current(); unsubUserRef.current = null; }
+      if (unsubSessionsRef.current) { unsubSessionsRef.current(); unsubSessionsRef.current = null; }
+
       if (currentUser) {
         setUser(currentUser);
         const userRef = doc(db, 'users', currentUser.uid);
         
-        // --- ✅ CRITICAL FIX: ENSURE USER DATABASE ENTRY EXISTS ---
         try {
             const docSnap = await getDoc(userRef);
             if (!docSnap.exists()) {
@@ -225,7 +231,7 @@ export default function Home() {
                     displayName: currentUser.displayName || 'User',
                     photoURL: currentUser.photoURL,
                     role: 'user', 
-                    status: 'pending', // Default to pending so new users see pending screen
+                    status: 'pending', 
                     createdAt: serverTimestamp(),
                     lastLogin: serverTimestamp()
                 });
@@ -236,13 +242,11 @@ export default function Home() {
             console.error("Error creating/updating user profile:", err);
         }
 
-        // --- REAL-TIME SECURITY CHECK & ROLE SYNC ---
-        // Instead of alerting and forcing reload, we simply update state to show the specific screen
+        // ✅ User Listener with Ref Storage
         const unsubUser = onSnapshot(userRef, (docSnap) => {
              const data = docSnap.data();
              if (data) {
                  setUserRole(data.role);
-                 // If user is admin, they are always approved
                  if (data.role === 'admin') {
                      setAccountStatus('approved');
                  } else {
@@ -251,39 +255,39 @@ export default function Home() {
              }
              setAuthLoading(false);
         });
+        unsubUserRef.current = unsubUser;
 
-        // Load Session if exists
         const savedSessionId = localStorage.getItem('turboLastSession');
         if (savedSessionId) setCurrentSessionId(savedSessionId);
 
-        // Load History List
+        // ✅ Sessions Listener with Ref Storage
         const q = query(collection(db, 'sessions'), where('userId', '==', currentUser.uid), orderBy('createdAt', 'desc'));
         const unsubSessions = onSnapshot(q, (snapshot) => {
           const fetchedSessions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Session));
-          // ✅ UPDATED: Filter out chats the user has "soft deleted"
           setSessions(fetchedSessions.filter(s => !s.deletedByUser));
         });
-
-        // Cleanup listeners
-        return () => {
-            unsubUser();
-            unsubSessions();
-        };
+        unsubSessionsRef.current = unsubSessions;
 
       } else {
+        // LOGOUT CLEANUP
         setSessions([]); setGroqMessages([]); setGoogleMessages([]);
         localStorage.removeItem('turboLastSession');
         setUser(null);
-        setAccountStatus('loading'); // Reset status
+        setAccountStatus('loading'); 
         setAuthLoading(false);
       }
     });
-    return () => unsubAuth();
+
+    // Cleanup on component unmount
+    return () => {
+        unsubAuth();
+        if (unsubUserRef.current) unsubUserRef.current();
+        if (unsubSessionsRef.current) unsubSessionsRef.current();
+    };
   }, []);
 
   // 2. LOAD CHAT
   useEffect(() => {
-    // Only load chat if status is approved
     if (currentSessionId && user && accountStatus === 'approved') {
       setGroqMessages([]); setGoogleMessages([]); 
       const qGroq = query(collection(db, 'chats'), where('sessionId', '==', currentSessionId), where('provider', '==', 'groq'), orderBy('createdAt', 'asc'));
@@ -305,7 +309,14 @@ export default function Home() {
   }, [googleMessages, focusedProvider]);
 
   // --- ACTIONS ---
-  const handleLogout = async () => { await signOut(auth); startNewChat(); };
+  const handleLogout = async () => { 
+      // Manually clear listeners before signing out to prevent permission errors
+      if (unsubUserRef.current) { unsubUserRef.current(); unsubUserRef.current = null; }
+      if (unsubSessionsRef.current) { unsubSessionsRef.current(); unsubSessionsRef.current = null; }
+      
+      await signOut(auth); 
+      startNewChat(); 
+  };
   
   const startNewChat = () => {
     setCurrentSessionId(null);
@@ -314,13 +325,15 @@ export default function Home() {
     setImage(null);
     stopSpeaking();
     setFocusedProvider(null);
-    if (window.innerWidth < 1280) setSidebarOpen(false);
+    // Auto-close sidebar on mobile only
+    if (window.innerWidth < 1024) setSidebarOpen(false);
   };
 
   const selectSession = (sessId: string) => {
     setCurrentSessionId(sessId);
     localStorage.setItem('turboLastSession', sessId);
-    if (window.innerWidth < 1280) setSidebarOpen(false);
+    // Auto-close sidebar on mobile only
+    if (window.innerWidth < 1024) setSidebarOpen(false);
   };
 
   const deleteSession = async (e: React.MouseEvent, sessId: string) => {
@@ -330,7 +343,6 @@ export default function Home() {
     if (currentSessionId === sessId) startNewChat();
 
     try {
-      // ✅ UPDATED: Soft Delete - Only update flag so user can't see it, but Admin can.
       await updateDoc(doc(db, 'sessions', sessId), {
           deletedByUser: true
       });
@@ -423,7 +435,7 @@ export default function Home() {
             messages: apiHistory, 
             provider, 
             image: imgData,
-            userId: user?.uid // ✅ ADDED USER ID FOR SECURITY CHECK
+            userId: user?.uid 
         }),
         signal: signal
       });
@@ -461,7 +473,6 @@ export default function Home() {
     setLoading(true);
     setInput('');
     
-    // ✅ CAPTURE Base64 for Immediate UI/AI (Performance)
     const localImageBase64 = image; 
     setImage(null);
 
@@ -474,7 +485,7 @@ export default function Home() {
         userId: user.uid,
         title: cleanInput.substring(0, 30) + (cleanInput.length > 30 ? '...' : '') || "Image Query",
         createdAt: serverTimestamp(),
-        deletedByUser: false // ✅ UPDATED: Initialize soft delete flag
+        deletedByUser: false
       });
       activeSessionId = docRef.id;
       setCurrentSessionId(activeSessionId);
@@ -482,46 +493,32 @@ export default function Home() {
     }
 
     const tempId = 'temp_user_' + Date.now();
-    // ✅ UI UPDATE: Use Base64 immediately so user sees it instantly
     const userMsg: Message = { id: tempId, role: 'user', content: cleanInput, image: localImageBase64, provider: 'google' };
 
-    // Update Local State based on active mode
     if (!focusedProvider || focusedProvider === 'google') setGoogleMessages(prev => [...prev, userMsg]);
     
-    // ✅ STRICT LOGIC: Do not update Groq state if image is present
     if (!localImageBase64 && (!focusedProvider || focusedProvider === 'groq')) {
         setGroqMessages(prev => [...prev, { ...userMsg, provider: 'groq' }]);
     }
 
     const promises = [];
-
-    // --- 🚀 UPDATED: UPLOAD TO STORAGE LOGIC ---
     let firestoreImageUrl = null;
     
     if (localImageBase64) {
       try {
-        // 1. Create a reference: chat-images / UserID / SessionID / Timestamp
         const storageRef = ref(storage, `chat-images/${user.uid}/${activeSessionId}/${Date.now()}.jpg`);
-        
-        // 2. Upload Base64 string directly
         await uploadString(storageRef, localImageBase64, 'data_url');
-        
-        // 3. Get the scalable Download URL for Firestore
         firestoreImageUrl = await getDownloadURL(storageRef);
       } catch (uploadError) {
         console.error("Image Upload Failed:", uploadError);
-        // Fallback: Use base64 or null if upload fails, to prevent crash
-        // For strict scalability we might default to null, but here we proceed.
       }
     }
 
-    // Log user message to DB
-    // ✅ UPDATED: Save 'firestoreImageUrl' (URL) instead of Base64 to Database
     promises.push(addDoc(collection(db, 'chats'), { 
         sessionId: activeSessionId, 
         role: 'user', 
         content: cleanInput, 
-        image: firestoreImageUrl, // Scalable URL
+        image: firestoreImageUrl,
         provider: 'google', 
         createdAt: serverTimestamp() 
     }));
@@ -530,25 +527,15 @@ export default function Home() {
         promises.push(addDoc(collection(db, 'chats'), { sessionId: activeSessionId, role: 'user', content: cleanInput, provider: 'groq', createdAt: serverTimestamp() }));
     }
 
-    // --- ✅ STRICT PROVIDER LOGIC START ---
-    // If Image: ONLY Gemini (Google)
-    // If Text Only: Both (or Focused)
-    
-    // 1. Google (Gemini) - Always runs if focused OR dual mode OR image present
-    // ✅ SEND TO AI: Pass 'localImageBase64' (Speed)
     if (localImageBase64 || !focusedProvider || focusedProvider === 'google') {
         promises.push(streamAnswer('google', [...googleMessages, userMsg], activeSessionId!, controller.signal, localImageBase64));
     }
 
-    // 2. Groq (Llama) - STRICTLY ONLY if NO image AND (focused OR dual mode)
     if (!localImageBase64 && (!focusedProvider || focusedProvider === 'groq')) {
         promises.push(streamAnswer('groq', [...groqMessages, { ...userMsg, provider: 'groq' }], activeSessionId!, controller.signal, null));
     } else if (localImageBase64 && focusedProvider === 'groq') {
-       // If user was focused on Groq but sent an image, we quietly switch to Gemini above
-       // and update the focus state to avoid confusion
        setFocusedProvider('google');
     }
-    // --- ✅ STRICT PROVIDER LOGIC END ---
 
     await Promise.all(promises);
     setLoading(false);
@@ -560,33 +547,9 @@ export default function Home() {
   if (authLoading) return <div className="flex h-[100dvh] items-center justify-center bg-[#131314] text-white"><Cpu size={48} className="text-purple-500 animate-pulse" /></div>;
   if (!user) return <Login />;
 
-  // 🔴 BANNED STATE
-  if (accountStatus === 'banned') {
-      return (
-          <StatusScreen 
-              color="red"
-              icon={<ShieldAlert size={40} className="text-red-500" />}
-              title="Access Revoked"
-              description="Your account has been flagged and banned by the administrator."
-              subtext="You are currently locked out."
-          />
-      );
-  }
+  if (accountStatus === 'banned') return <StatusScreen color="red" icon={<ShieldAlert size={40} className="text-red-500" />} title="Access Revoked" description="Your account has been flagged and banned." subtext="You are currently locked out." />;
+  if (accountStatus === 'pending') return <StatusScreen color="yellow" icon={<Clock size={40} className="text-yellow-500 animate-pulse" />} title="Verification Pending" description="Your account is waiting for approval." subtext="Wait here. This page will unlock automatically." />;
 
-  // 🟡 PENDING STATE
-  if (accountStatus === 'pending') {
-      return (
-          <StatusScreen 
-              color="yellow"
-              icon={<Clock size={40} className="text-yellow-500 animate-pulse" />}
-              title="Verification Pending"
-              description="Your account is waiting for administrator approval."
-              subtext="Wait here. This page will unlock automatically when approved."
-          />
-      );
-  }
-
-  // 🟢 APPROVED STATE (Normal Chat UI)
   return (
     <div className="flex h-[100dvh] bg-[#131314] text-gray-100 font-sans overflow-hidden selection:bg-purple-500/30 selection:text-white relative">
       
@@ -600,20 +563,18 @@ export default function Home() {
         />
       )}
 
-      {/* MOBILE OVERLAY */}
+      {/* MOBILE OVERLAY (BACKDROP) */}
       {sidebarOpen && (
         <div 
-          className="fixed inset-0 bg-black/60 z-40 xl:hidden backdrop-blur-md animate-in fade-in duration-200"
+          className="fixed inset-0 bg-black/50 z-40 lg:hidden backdrop-blur-sm transition-opacity"
           onClick={() => setSidebarOpen(false)}
         />
       )}
 
-      {/* SIDEBAR */}
+      {/* SIDEBAR - GEMINI STYLE */}
       <aside 
-        className={`fixed inset-y-0 left-0 z-50 bg-[#1e1f20] border-r border-white/5 flex flex-col transition-all duration-300 ease-in-out shadow-2xl
-          xl:static xl:z-auto
-          ${sidebarOpen ? 'translate-x-0 w-[280px]' : '-translate-x-full xl:translate-x-0 xl:w-0 xl:border-none'} 
-          overflow-hidden whitespace-nowrap
+        className={`fixed lg:static inset-y-0 left-0 z-50 flex flex-col bg-[#1e1f20] border-r border-white/5 transition-all duration-300 ease-in-out shadow-2xl
+          ${sidebarOpen ? 'translate-x-0 w-[280px]' : '-translate-x-full lg:translate-x-0 lg:w-0 lg:border-none lg:overflow-hidden'}
         `}
       >
         <div className="p-4 flex flex-col gap-4 min-w-[280px]">
@@ -625,10 +586,9 @@ export default function Home() {
             >
               <Menu size={20} />
             </button>
-            <span className="text-sm font-bold text-gray-200 px-2 xl:block hidden tracking-wide">TurboLearn</span>
+            <span className="text-sm font-bold text-gray-200 px-2 tracking-wide">TurboLearn</span>
           </div>
 
-          {/* NEW: Admin Portal Button (Only visible if role is 'admin') */}
           {userRole === 'admin' && (
              <button 
                onClick={() => window.location.href='/admin'} 
@@ -638,27 +598,26 @@ export default function Home() {
              </button>
           )}
 
-          <button onClick={startNewChat} className="flex items-center gap-3 px-4 py-3 rounded-full bg-gradient-to-r from-[#1a1b1c] to-[#202123] hover:from-[#333537] hover:to-[#383a3c] transition-all text-sm font-medium text-gray-200 shadow-md border border-white/5 active:scale-95">
-            <Plus size={18} className="text-gray-400" /> New chat
+          <button onClick={startNewChat} className="flex items-center gap-3 px-4 py-3 rounded-full bg-[#1a1b1c] hover:bg-[#333537] transition-all text-sm font-medium text-gray-200 border border-white/5 active:scale-95 shadow-sm">
+            <Plus size={18} className="text-gray-400" /> <span className="font-medium text-sm">New chat</span>
           </button>
         </div>
 
         <div className="flex-1 overflow-y-auto custom-scrollbar px-3 min-w-[280px]">
-          <div className="text-[10px] font-bold text-gray-500 mb-2 px-3 mt-2 uppercase tracking-widest">History</div>
+          <div className="text-[11px] font-bold text-gray-500 mb-2 px-3 mt-2 uppercase tracking-widest flex items-center gap-2">
+             <History size={12} /> Recent
+          </div>
           <div className="space-y-1">
             {sessions.map((sess) => (
               <div key={sess.id} onClick={() => selectSession(sess.id)}
-                className={`group flex items-center justify-between px-3 py-3 rounded-lg cursor-pointer text-sm transition-all border border-transparent ${currentSessionId === sess.id ? 'bg-[#004a77]/30 text-blue-100 border-blue-500/20 shadow-sm' : 'text-gray-400 hover:bg-[#282a2c] hover:text-gray-200'}`}>
-                <div className="flex items-center gap-3 overflow-hidden">
-                  <MessageSquare size={16} className="flex-none opacity-70" />
-                  <span className="truncate w-40">{sess.title}</span>
-                </div>
+                className={`group flex items-center justify-between px-3 py-2 rounded-full cursor-pointer text-sm transition-all border border-transparent ${currentSessionId === sess.id ? 'bg-[#004a77]/40 text-blue-100 font-medium' : 'text-gray-400 hover:bg-[#282a2c] hover:text-gray-200'}`}>
+                <span className="truncate w-44 text-[13px]">{sess.title}</span>
                 <button 
                     onClick={(e) => deleteSession(e, sess.id)} 
-                    className="opacity-100 xl:opacity-0 xl:group-hover:opacity-100 hover:text-red-400 p-1.5 transition-opacity"
+                    className="opacity-0 group-hover:opacity-100 hover:text-red-400 p-1 transition-opacity"
                     title="Delete Chat"
                 >
-                    <Trash2 size={14} />
+                    <Trash2 size={12} />
                 </button>
               </div>
             ))}
@@ -675,39 +634,41 @@ export default function Home() {
       </aside>
 
       {/* MAIN CONTENT */}
-      <main className="flex-1 flex flex-col h-[100dvh] relative bg-[#131314] w-full min-w-0">
+      <main className="flex-1 flex flex-col h-[100dvh] relative bg-[#131314] w-full min-w-0 transition-all duration-300">
         
-        {/* HEADER (Floating with high Z-index for menu access) */}
-        <div className="flex-none h-16 flex items-center px-4 z-50 absolute top-0 w-full bg-transparent pointer-events-none">
-          {/* Header content: Pointer events auto enabled specifically for buttons */}
-          <div className={`flex items-center w-full ${focusedProvider ? 'hidden' : ''}`}>
-            <button 
-              onClick={() => setSidebarOpen(true)} 
-              className={`p-2 text-gray-400 hover:bg-[#2c2d2e]/80 hover:text-white rounded-full transition-colors mr-3 active:scale-95 backdrop-blur-md bg-black/20 pointer-events-auto ${sidebarOpen ? 'xl:hidden opacity-0' : 'opacity-100'}`}
+        {/* HEADER */}
+        <div className="flex-none h-16 flex items-center px-4 z-40 bg-transparent">
+          {/* Menu button only visible when sidebar is closed on desktop OR always on mobile */}
+          <div className={`flex items-center transition-opacity duration-300 ${sidebarOpen ? 'lg:opacity-0 pointer-events-none' : 'opacity-100'}`}>
+             <button 
+              onClick={() => setSidebarOpen(true)}
+              className="p-2 text-gray-400 hover:bg-[#2c2d2e]/80 hover:text-white rounded-full transition-colors active:scale-95 pointer-events-auto"
             >
               <Menu size={24} />
             </button>
-
-            {!currentSessionId && groqMessages.length === 0 && <span className="text-base md:text-lg font-medium text-gray-500 mx-auto pointer-events-none tracking-tight opacity-50">TurboLearn AI</span>}
-            
-            {isSpeaking && (
-              <button onClick={stopSpeaking} className="ml-auto flex items-center gap-2 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 backdrop-blur-md text-red-400 px-4 py-1.5 rounded-full shadow-lg transition-all animate-pulse text-xs font-bold z-50 pointer-events-auto">
-                <VolumeX size={14} /> <span className="hidden md:inline">Stop Reading</span>
-              </button>
-            )}
           </div>
+
+          <div className="flex-1 flex justify-center pointer-events-none">
+             {!currentSessionId && groqMessages.length === 0 && <span className="text-base font-medium text-gray-500 tracking-tight opacity-50">TurboLearn AI</span>}
+          </div>
+            
+          {isSpeaking && (
+            <button onClick={stopSpeaking} className="flex items-center gap-2 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 backdrop-blur-md text-red-400 px-4 py-1.5 rounded-full shadow-lg transition-all animate-pulse text-xs font-bold z-50 pointer-events-auto">
+              <VolumeX size={14} /> <span className="hidden md:inline">Stop</span>
+            </button>
+          )}
         </div>
 
         {/* CHAT SCROLL AREA */}
-        <div className="flex-1 overflow-y-auto custom-scrollbar p-3 md:p-6 pb-0 pt-16">
-          <div className={`mx-auto h-full pb-32 md:pb-40 transition-all duration-300 ${focusedProvider ? 'max-w-5xl' : (sidebarOpen ? 'max-w-6xl grid grid-cols-1 xl:grid-cols-2 gap-4 md:gap-6' : 'max-w-7xl grid grid-cols-1 xl:grid-cols-2 gap-6')}`}>
+        <div className="flex-1 overflow-y-auto custom-scrollbar p-3 md:p-6 pb-0 pt-0">
+          <div className={`mx-auto h-full pb-32 md:pb-40 transition-all duration-300 w-full max-w-[1800px] ${focusedProvider ? 'max-w-4xl mx-auto' : 'grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6'}`}>
             
             {/* GROQ CARD */}
             {(!focusedProvider || focusedProvider === 'groq') && (
               <div className={`flex flex-col rounded-2xl bg-[#1e1f20] border border-[#2c2d2e] shadow-xl relative overflow-hidden transition-all duration-300
-                ${focusedProvider === 'groq' ? 'h-full border-orange-500/30 shadow-[0_0_50px_rgba(249,115,22,0.1)]' : 'min-h-[40vh] h-full xl:h-auto'}
+                ${focusedProvider === 'groq' ? 'h-[calc(100vh-180px)] border-orange-500/30 shadow-[0_0_50px_rgba(249,115,22,0.1)]' : 'h-[45vh] lg:h-[calc(100vh-180px)]'}
               `}>
-                <div className="flex items-center justify-between px-3 py-2 md:px-5 md:py-3 bg-[#1e1f20]/90 backdrop-blur-sm border-b border-[#2c2d2e] sticky top-0 z-10">
+                <div className="flex items-center justify-between px-4 py-3 bg-[#1e1f20]/95 backdrop-blur-sm border-b border-[#2c2d2e] sticky top-0 z-10">
                   <div className="flex items-center gap-2">
                     {focusedProvider === 'groq' && <button onClick={() => setFocusedProvider(null)}><ArrowLeft size={18} className="text-gray-400 hover:text-white mr-2" /></button>}
                     <Cpu size={16} className="text-orange-400" />
@@ -722,7 +683,7 @@ export default function Home() {
                   </button>
                 </div>
                 <div className="flex-1 p-3 md:p-5 overflow-y-auto custom-scrollbar">
-                  {!currentSessionId && groqMessages.length === 0 && <div className="h-40 md:h-full flex flex-col gap-2 items-center justify-center text-gray-700 opacity-40"><Cpu size={48} /><span className="text-xs font-medium">Ready</span></div>}
+                  {!currentSessionId && groqMessages.length === 0 && <div className="h-full flex flex-col gap-2 items-center justify-center text-gray-700 opacity-40"><Cpu size={48} /><span className="text-xs font-medium">Ready</span></div>}
                   {groqMessages.map((m, i) => (
                     <div key={i} className={`mb-6 flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                       <div className={`max-w-[95%] md:max-w-[90%] ${m.role === 'user' ? 'bg-[#2c2d2e] px-4 py-3 rounded-2xl rounded-tr-none' : ''}`}>
@@ -740,9 +701,9 @@ export default function Home() {
             {/* GEMINI CARD */}
             {(!focusedProvider || focusedProvider === 'google') && (
               <div className={`flex flex-col rounded-2xl bg-[#1e1f20] border border-[#2c2d2e] shadow-xl overflow-hidden transition-all duration-300
-                ${focusedProvider === 'google' ? 'h-full border-blue-500/30 shadow-[0_0_50px_rgba(59,130,246,0.1)]' : 'min-h-[40vh] h-full xl:h-auto'}
+                ${focusedProvider === 'google' ? 'h-[calc(100vh-180px)] border-blue-500/30 shadow-[0_0_50px_rgba(59,130,246,0.1)]' : 'h-[45vh] lg:h-[calc(100vh-180px)]'}
               `}>
-                <div className="flex items-center justify-between px-3 py-2 md:px-5 md:py-3 bg-[#1e1f20]/90 backdrop-blur-sm border-b border-[#2c2d2e] sticky top-0 z-10">
+                <div className="flex items-center justify-between px-4 py-3 bg-[#1e1f20]/95 backdrop-blur-sm border-b border-[#2c2d2e] sticky top-0 z-10">
                   <div className="flex items-center gap-2">
                     {focusedProvider === 'google' && <button onClick={() => setFocusedProvider(null)}><ArrowLeft size={18} className="text-gray-400 hover:text-white mr-2" /></button>}
                     <Sparkles size={16} className="text-blue-400" />
@@ -757,7 +718,7 @@ export default function Home() {
                   </button>
                 </div>
                 <div className="flex-1 p-3 md:p-5 overflow-y-auto custom-scrollbar">
-                  {!currentSessionId && googleMessages.length === 0 && <div className="h-40 md:h-full flex flex-col gap-2 items-center justify-center text-gray-700 opacity-40"><Sparkles size={48} /><span className="text-xs font-medium">Ready</span></div>}
+                  {!currentSessionId && googleMessages.length === 0 && <div className="h-full flex flex-col gap-2 items-center justify-center text-gray-700 opacity-40"><Sparkles size={48} /><span className="text-xs font-medium">Ready</span></div>}
                   {googleMessages.map((m, i) => (
                     <div key={i} className={`mb-6 flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                       <div className={`max-w-[95%] md:max-w-[90%] ${m.role === 'user' ? 'bg-[#2c2d2e] px-4 py-3 rounded-2xl rounded-tr-none' : ''}`}>
@@ -795,31 +756,30 @@ export default function Home() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 placeholder={isListening ? "Listening..." : focusedProvider ? `Talk to ${focusedProvider === 'groq' ? 'Llama' : 'Gemini'}...` : "Ask anything or scan..."}
-                className={`w-full bg-[#1e1f20]/80 backdrop-blur-xl text-gray-100 placeholder-gray-500 rounded-full py-3 md:py-4 pl-24 md:pl-36 pr-20 md:pr-28 
-                  focus:outline-none focus:bg-[#1e1f20] focus:ring-1 focus:ring-white/10 focus:shadow-[0_0_20px_rgba(0,0,0,0.5)] 
-                  transition-all text-[15px] border border-[#2c2d2e] shadow-xl
+                className={`w-full bg-[#1e1f20] text-gray-100 placeholder-gray-500 rounded-full py-3 md:py-4 pl-12 md:pl-14 pr-20 md:pr-28 
+                  focus:outline-none focus:ring-1 focus:ring-white/10 focus:bg-[#2c2d2e]
+                  transition-all text-[15px] border border-[#2c2d2e] shadow-lg hover:shadow-xl
                   ${isListening ? 'border-red-500/50 bg-red-900/10' : ''}`}
                 style={{ fontSize: '16px' }} 
               />
               
               {/* LEFT ACTIONS (Media) */}
-              <div className="absolute left-2 top-2 bottom-2 flex items-center gap-0 md:gap-1 bg-[#2c2d2e]/50 rounded-full px-1 backdrop-blur-sm border border-white/5">
-                <button type="button" onClick={() => fileInputRef.current?.click()} className="p-1.5 md:p-2 text-gray-400 hover:text-white rounded-full transition-colors hover:bg-white/10" title="Upload Image"><ImageIcon size={18} /></button>
+              <div className="absolute left-2 top-2 bottom-2 flex items-center gap-0 md:gap-1 rounded-full px-1">
+                <button type="button" onClick={() => fileInputRef.current?.click()} className="p-1.5 md:p-2 text-gray-400 hover:text-white rounded-full transition-colors hover:bg-white/10" title="Upload Image"><Plus size={20} /></button>
                 <input type="file" ref={fileInputRef} onChange={handleImageUpload} accept="image/*" className="hidden" />
-                <div className="w-[1px] h-3 md:h-4 bg-white/10 my-auto"></div>
-                <button type="button" onClick={() => setCameraMode('capture')} className="p-1.5 md:p-2 text-gray-400 hover:text-blue-400 rounded-full transition-colors hover:bg-white/10" title="Take Photo"><Camera size={18} /></button>
-                <button type="button" onClick={() => setCameraMode('scan')} className="p-1.5 md:p-2 text-gray-400 hover:text-green-400 rounded-full transition-colors hover:bg-white/10" title="Scan Text (Lens)"><ScanText size={18} /></button>
               </div>
 
               {/* RIGHT ACTIONS (Voice/Send) */}
               <div className="absolute right-2 top-2 bottom-2 flex items-center gap-1 md:gap-2">
+                 <button type="button" onClick={() => setCameraMode('scan')} className="p-1.5 md:p-2 text-gray-400 hover:text-white rounded-full transition-colors hover:bg-white/10 hidden sm:block" title="Scan Text"><ScanText size={18} /></button>
+                 <button type="button" onClick={() => setCameraMode('capture')} className="p-1.5 md:p-2 text-gray-400 hover:text-white rounded-full transition-colors hover:bg-white/10 hidden sm:block" title="Camera"><Camera size={18} /></button>
                 <button type="button" onClick={toggleVoiceInput} className={`p-2 md:p-2.5 rounded-full transition-all active:scale-90 ${isListening ? 'text-white bg-red-500 animate-pulse shadow-lg shadow-red-500/30' : 'text-gray-400 hover:text-white hover:bg-white/10'}`}>
                   <Mic size={20} />
                 </button>
                 <button 
                   type={loading ? 'button' : 'submit'} 
                   onClick={loading ? stopGenerating : undefined} 
-                  className={`p-2 md:p-2.5 rounded-full transition-all active:scale-90 shadow-lg ${loading ? 'bg-white text-black' : 'bg-[#2c2d2e] text-white hover:bg-[#3c3d3e] disabled:opacity-50 disabled:bg-transparent disabled:shadow-none'}`} 
+                  className={`p-2 md:p-2.5 rounded-full transition-all active:scale-90 shadow-lg ${loading ? 'bg-white text-black' : 'bg-[#3c3d3e] text-white hover:bg-[#4a4b4d] disabled:opacity-50 disabled:bg-transparent disabled:shadow-none'}`} 
                   disabled={(!input.trim() && !image) && !loading}
                 >
                   {loading ? <StopCircle size={20} fill="currentColor" /> : <Terminal size={20} />}
