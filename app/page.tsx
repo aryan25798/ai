@@ -187,16 +187,47 @@ export default function Home() {
     if (window.innerWidth < 768) setSidebarOpen(false);
   };
 
+  // --- UPDATED DELETE FUNCTION (CRASH PROOF) ---
   const deleteSession = async (e: React.MouseEvent, sessId: string) => {
     e.stopPropagation();
     if (!confirm("Delete this chat?")) return;
+    
+    // UI Cleanup first
     if (currentSessionId === sessId) startNewChat();
-    await deleteDoc(doc(db, 'sessions', sessId));
-    const q = query(collection(db, 'chats'), where('sessionId', '==', sessId));
-    const snapshot = await getDocs(q);
-    const batch = writeBatch(db);
-    snapshot.docs.forEach((doc) => batch.delete(doc.ref));
-    await batch.commit();
+
+    try {
+      // 1. Delete the Session Document
+      await deleteDoc(doc(db, 'sessions', sessId));
+
+      // 2. Query all messages for this session
+      const q = query(collection(db, 'chats'), where('sessionId', '==', sessId));
+      const snapshot = await getDocs(q);
+
+      // 3. Batch delete logic (Chunked by 450 to avoid 500 limit)
+      const BATCH_SIZE = 450;
+      let batch = writeBatch(db);
+      let count = 0;
+
+      for (const doc of snapshot.docs) {
+        batch.delete(doc.ref);
+        count++;
+
+        if (count >= BATCH_SIZE) {
+          await batch.commit();
+          batch = writeBatch(db); // Create new batch
+          count = 0;
+        }
+      }
+
+      // Commit remaining messages
+      if (count > 0) {
+        await batch.commit();
+      }
+
+    } catch (error) {
+      console.error("Error deleting session:", error);
+      alert("Failed to delete chat history.");
+    }
   };
 
   // --- MEDIA ---
