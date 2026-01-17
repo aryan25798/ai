@@ -24,11 +24,17 @@ export default function CameraModal({ mode, onClose, onCapture, onScan }: Camera
   const [selectedIndices, setSelectedIndices] = useState<Set<number>>(new Set());
   const [viewState, setViewState] = useState<'camera' | 'processing' | 'selection'>('camera');
   
+  // Drag Selection State
+  const selectionRef = useRef<HTMLDivElement>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragStart, setDragStart] = useState<{x: number, y: number} | null>(null);
+  const [dragCurrent, setDragCurrent] = useState<{x: number, y: number} | null>(null);
+
   // Camera Capabilities State
   const [hasTorch, setHasTorch] = useState(false);
   const [torchOn, setTorchOn] = useState(false);
   const [exposureRange, setExposureRange] = useState<{min: number, max: number, step: number} | null>(null);
-  const [brightness, setBrightness] = useState(0); // Exposure Compensation
+  const [brightness, setBrightness] = useState(0); 
   const [focusPoint, setFocusPoint] = useState<{x: number, y: number} | null>(null);
   const [isCameraReady, setIsCameraReady] = useState(false);
 
@@ -37,7 +43,7 @@ export default function CameraModal({ mode, onClose, onCapture, onScan }: Camera
     facingMode: 'environment',
     width: { ideal: 1920 }, 
     height: { ideal: 1080 },
-    frameRate: { ideal: 60, min: 30 } // High FPS reduces screen flicker/banding
+    frameRate: { ideal: 60, min: 30 }
   };
 
   // 2. Initialize Camera Capabilities
@@ -47,31 +53,28 @@ export default function CameraModal({ mode, onClose, onCapture, onScan }: Camera
     const capabilities = (track as any).getCapabilities ? (track as any).getCapabilities() : {};
     const settings = track.getSettings();
 
-    // Torch Support
     if (capabilities.torch) setHasTorch(true);
 
-    // Exposure Support (Crucial for Screens)
+    // Fix: Cast settings to 'any' to access exposureCompensation
     if (capabilities.exposureCompensation) {
       setExposureRange(capabilities.exposureCompensation);
-      setBrightness(settings.exposureCompensation || 0);
+      setBrightness((settings as any).exposureCompensation || 0);
     }
 
-    // Apply "Monitor Mode" Defaults (Continuous Focus & Exposure)
     const advancedConstraints: any[] = [];
     if (capabilities.focusMode?.includes('continuous')) advancedConstraints.push({ focusMode: 'continuous' });
     if (capabilities.exposureMode?.includes('continuous')) advancedConstraints.push({ exposureMode: 'continuous' });
     if (capabilities.whiteBalanceMode?.includes('continuous')) advancedConstraints.push({ whiteBalanceMode: 'continuous' });
 
     if (advancedConstraints.length > 0) {
-      track.applyConstraints({ advanced: advancedConstraints }).catch(e => console.log("Constraint warning:", e));
+      track.applyConstraints({ advanced: advancedConstraints }).catch(() => {});
     }
   }, []);
 
-  // 3. Adjust Exposure (Brightness Slider)
+  // 3. Adjust Exposure
   const handleBrightnessChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const newVal = parseFloat(e.target.value);
     setBrightness(newVal);
-    
     try {
       const stream = webcamRef.current?.video?.srcObject as MediaStream;
       const track = stream?.getVideoTracks()[0];
@@ -80,9 +83,7 @@ export default function CameraModal({ mode, onClose, onCapture, onScan }: Camera
             advanced: [{ exposureCompensation: newVal }] as any
          });
       }
-    } catch (err) {
-      console.warn("Exposure adjustment failed", err);
-    }
+    } catch (err) {}
   };
 
   // 4. Toggle Flashlight
@@ -94,10 +95,10 @@ export default function CameraModal({ mode, onClose, onCapture, onScan }: Camera
             await track.applyConstraints({ advanced: [{ torch: !torchOn }] as any });
             setTorchOn(!torchOn);
         }
-    } catch (e) { console.error("Torch toggle failed", e); }
+    } catch (e) {}
   };
 
-  // 5. High-Quality Capture with Anti-Glare Processing
+  // 5. Capture Logic
   const capture = useCallback(() => {
     const src = webcamRef.current?.getScreenshot();
     if (!src) return;
@@ -116,13 +117,9 @@ export default function CameraModal({ mode, onClose, onCapture, onScan }: Camera
         if (ctx) {
             ctx.imageSmoothingEnabled = true;
             ctx.imageSmoothingQuality = 'high';
-            
-            // OPTIMIZATION: Reduce contrast slightly to recover text from blown-out screens
-            // 0.95 brightness reduces glare, 1.05 contrast restores sharpness
             ctx.filter = 'brightness(0.95) contrast(1.05)';
-            
             ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-            ctx.filter = 'none'; // Reset
+            ctx.filter = 'none'; 
             
             const optimizedImage = canvas.toDataURL('image/jpeg', 0.92);
             setImage(optimizedImage);
@@ -161,17 +158,67 @@ export default function CameraModal({ mode, onClose, onCapture, onScan }: Camera
     }
   };
 
-  // 7. Selection Helpers
+  // 7. DRAG TO SELECT LOGIC (Google Lens Style)
+  const handlePointerDown = (e: React.PointerEvent) => {
+    if (viewState !== 'selection' || !selectionRef.current) return;
+    e.preventDefault();
+    const rect = selectionRef.current.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * 100;
+    const y = ((e.clientY - rect.top) / rect.height) * 100;
+    
+    setIsDragging(true);
+    setDragStart({ x, y });
+    setDragCurrent({ x, y });
+  };
+
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (!isDragging || !selectionRef.current || !dragStart) return;
+    e.preventDefault();
+    const rect = selectionRef.current.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * 100;
+    const y = ((e.clientY - rect.top) / rect.height) * 100;
+    
+    setDragCurrent({ x, y });
+
+    // Calculate Selection Box
+    const boxLeft = Math.min(dragStart.x, x);
+    const boxRight = Math.max(dragStart.x, x);
+    const boxTop = Math.min(dragStart.y, y);
+    const boxBottom = Math.max(dragStart.y, y);
+
+    // Find intersecting words
+    const newSelected = new Set(selectedIndices);
+    ocrResult.forEach((item, index) => {
+       const itemCenterX = item.box[0] + item.box[2] / 2;
+       const itemCenterY = item.box[1] + item.box[3] / 2;
+       
+       // Check if center of word is inside selection box
+       if (itemCenterX >= boxLeft && itemCenterX <= boxRight &&
+           itemCenterY >= boxTop && itemCenterY <= boxBottom) {
+           newSelected.add(index);
+       }
+    });
+    setSelectedIndices(newSelected);
+  };
+
+  const handlePointerUp = () => {
+    setIsDragging(false);
+    setDragStart(null);
+    setDragCurrent(null);
+  };
+
   const toggleSelection = (index: number) => {
     const newSet = new Set(selectedIndices);
     if (newSet.has(index)) newSet.delete(index);
     else newSet.add(index);
     setSelectedIndices(newSet);
   };
+
   const selectAll = () => {
     if (selectedIndices.size === ocrResult.length) setSelectedIndices(new Set());
     else setSelectedIndices(new Set(ocrResult.map((_, i) => i)));
   };
+
   const confirmSelection = () => {
     const selectedItems = ocrResult
       .map((item, index) => ({ item, index }))
@@ -185,10 +232,8 @@ export default function CameraModal({ mode, onClose, onCapture, onScan }: Camera
     onScan(selectedItems.join(' '));
   };
 
-  // 8. Robust Tap to Focus + Exposure
   const handleTapToFocus = async (e: React.MouseEvent<HTMLDivElement>) => {
       if (viewState !== 'camera' || !isCameraReady) return;
-      
       const rect = e.currentTarget.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
@@ -199,21 +244,16 @@ export default function CameraModal({ mode, onClose, onCapture, onScan }: Camera
           const track = stream?.getVideoTracks()[0];
           const capabilities = (track as any).getCapabilities ? (track as any).getCapabilities() : {};
 
-          // "Points of Interest" usually handles both Focus AND Exposure for that specific point
           if (capabilities.pointsOfInterest) {
               const normX = x / rect.width;
               const normY = y / rect.height;
               await track.applyConstraints({
                   advanced: [{ pointsOfInterest: [{ x: normX, y: normY }] }] as any
               }).catch(() => {});
-          } else {
-              // Fallback: Trigger re-focus
-              if (capabilities.focusMode?.includes('auto')) {
-                 await track?.applyConstraints({ advanced: [{ focusMode: 'auto' }] as any }).catch(() => {});
-                 // Return to continuous
-                 if (capabilities.focusMode?.includes('continuous')) {
-                     setTimeout(() => track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] as any }).catch(() => {}), 1000);
-                 }
+          } else if (capabilities.focusMode?.includes('auto')) {
+              await track?.applyConstraints({ advanced: [{ focusMode: 'auto' }] as any }).catch(() => {});
+              if (capabilities.focusMode?.includes('continuous')) {
+                  setTimeout(() => track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] as any }).catch(() => {}), 1000);
               }
           }
       } catch(e) {}
@@ -221,7 +261,7 @@ export default function CameraModal({ mode, onClose, onCapture, onScan }: Camera
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black flex flex-col animate-in fade-in duration-300 font-sans select-none">
+    <div className="fixed inset-0 z-50 bg-black flex flex-col animate-in fade-in duration-300 font-sans select-none touch-none">
       
       {/* HEADER */}
       <div className="flex-none h-16 px-4 flex justify-between items-center bg-gradient-to-b from-black/80 to-transparent absolute top-0 w-full z-30">
@@ -229,7 +269,7 @@ export default function CameraModal({ mode, onClose, onCapture, onScan }: Camera
           <X size={22} />
         </button>
         <span className="font-medium text-white/90 tracking-wide text-sm bg-black/30 px-3 py-1 rounded-full backdrop-blur-md border border-white/10">
-          {viewState === 'selection' ? 'Select Text' : mode === 'scan' ? 'Scan Monitor' : 'Camera'}
+          {viewState === 'selection' ? 'Swipe to select' : mode === 'scan' ? 'Scan Monitor' : 'Camera'}
         </span>
         <div className="w-10 flex justify-end">
             {hasTorch && viewState === 'camera' && (
@@ -246,7 +286,7 @@ export default function CameraModal({ mode, onClose, onCapture, onScan }: Camera
       {/* MAIN VIEWPORT */}
       <div 
         className="flex-1 relative overflow-hidden flex items-center justify-center bg-black cursor-crosshair"
-        onClick={handleTapToFocus}
+        onMouseDown={viewState === 'camera' ? handleTapToFocus : undefined}
       >
         {viewState === 'camera' && (
           <>
@@ -265,8 +305,6 @@ export default function CameraModal({ mode, onClose, onCapture, onScan }: Camera
                     style={{ left: focusPoint.x, top: focusPoint.y }}
                 />
             )}
-            
-            {/* EXPOSURE SLIDER (The "Screen Fix") */}
             {exposureRange && (
                 <div className="absolute right-4 top-1/2 -translate-y-1/2 h-48 w-8 bg-black/30 backdrop-blur-md rounded-full flex flex-col items-center justify-between py-3 border border-white/10 animate-in slide-in-from-right-4 z-40" onClick={(e) => e.stopPropagation()}>
                     <Sun size={14} className="text-yellow-200" />
@@ -286,7 +324,7 @@ export default function CameraModal({ mode, onClose, onCapture, onScan }: Camera
           </>
         )}
 
-        {/* IMAGE PREVIEW */}
+        {/* IMAGE PREVIEW & SELECTION LAYER */}
         {(viewState === 'processing' || viewState === 'selection') && image && (
           <div className="relative w-full h-full animate-in fade-in duration-500">
             <img src={image} alt="Captured" className="w-full h-full object-contain bg-[#121212]" />
@@ -301,14 +339,42 @@ export default function CameraModal({ mode, onClose, onCapture, onScan }: Camera
             )}
 
             {viewState === 'selection' && (
-              <div className="absolute inset-0 z-20">
+              <div 
+                ref={selectionRef}
+                className="absolute inset-0 z-20 touch-none"
+                onPointerDown={handlePointerDown}
+                onPointerMove={handlePointerMove}
+                onPointerUp={handlePointerUp}
+                onPointerLeave={handlePointerUp}
+              >
+                {/* Drag Selection Box (Visual) */}
+                {isDragging && dragStart && dragCurrent && (
+                    <div 
+                        className="absolute border-2 border-blue-500 bg-blue-500/20"
+                        style={{
+                            left: `${Math.min(dragStart.x, dragCurrent.x)}%`,
+                            top: `${Math.min(dragStart.y, dragCurrent.y)}%`,
+                            width: `${Math.abs(dragCurrent.x - dragStart.x)}%`,
+                            height: `${Math.abs(dragCurrent.y - dragStart.y)}%`
+                        }}
+                    />
+                )}
+
+                {/* Detected Words */}
                 {ocrResult.map((item, i) => (
                   <div
                     key={i}
                     onClick={(e) => { e.stopPropagation(); toggleSelection(i); }}
-                    className={`absolute transition-all duration-200 cursor-pointer rounded-sm flex items-center justify-center ${selectedIndices.has(i) ? 'bg-blue-500/40 ring-1 ring-blue-400' : 'bg-white/10 hover:bg-white/20'}`}
+                    className={`absolute transition-all duration-150 rounded-sm cursor-pointer
+                      ${selectedIndices.has(i) 
+                        ? 'bg-blue-500/50' 
+                        : 'bg-transparent'
+                      }`}
                     style={{ left: `${item.box[0]}%`, top: `${item.box[1]}%`, width: `${item.box[2]}%`, height: `${item.box[3]}%` }}
-                  />
+                  >
+                     {/* Debug/Highlight overlay */}
+                     <div className={`w-full h-full ${!selectedIndices.has(i) && 'hover:bg-white/20'}`}></div>
+                  </div>
                 ))}
               </div>
             )}

@@ -7,7 +7,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { 
   Copy, Check, Terminal, Cpu, Sparkles, Plus, MessageSquare, Trash2, LogIn, LogOut, Menu, X, User as UserIcon, 
-  Image as ImageIcon, Mic, Volume2, StopCircle, VolumeX, Camera, ScanText, FileText
+  Image as ImageIcon, Mic, Volume2, StopCircle, VolumeX, Camera, ScanText, Maximize2, Minimize2, ArrowLeft
 } from 'lucide-react';
 import { db, auth } from '@/lib/firebase';
 import { signOut, onAuthStateChanged, User } from 'firebase/auth';
@@ -87,9 +87,6 @@ const MarkdownRenderer = ({
 }) => {
   return (
     <div className="relative group max-w-full">
-      {/* FIX: Button is now absolute positioned INSIDE the padding.
-         Default opacity is 40% (visible on mobile), 100% on hover/active.
-      */}
       <button 
         onClick={() => onToggleSpeak(content, msgId)}
         className={`absolute top-0 right-0 p-2 rounded-lg transition-all duration-200 z-10
@@ -103,7 +100,6 @@ const MarkdownRenderer = ({
         {isSpeaking ? <StopCircle size={16} className="animate-pulse" /> : <Volume2 size={16} />}
       </button>
 
-      {/* Content Container with right padding to prevent overlap with speaker icon */}
       <div className="pr-8">
         <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
           code({ node, inline, className, children, ...props }: any) {
@@ -137,6 +133,9 @@ export default function Home() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  // Focus Mode State
+  const [focusedProvider, setFocusedProvider] = useState<'groq' | 'google' | null>(null);
 
   // Media & Tools
   const [image, setImage] = useState<string | null>(null);
@@ -200,8 +199,13 @@ export default function Home() {
     }
   }, [currentSessionId, user]);
 
-  useEffect(() => { groqEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [groqMessages]);
-  useEffect(() => { googleEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [googleMessages]);
+  useEffect(() => { 
+      if (!focusedProvider || focusedProvider === 'groq') groqEndRef.current?.scrollIntoView({ behavior: 'smooth' }); 
+  }, [groqMessages, focusedProvider]);
+  
+  useEffect(() => { 
+      if (!focusedProvider || focusedProvider === 'google') googleEndRef.current?.scrollIntoView({ behavior: 'smooth' }); 
+  }, [googleMessages, focusedProvider]);
 
   // --- ACTIONS ---
   const handleLogout = async () => { await signOut(auth); startNewChat(); };
@@ -212,6 +216,7 @@ export default function Home() {
     setGroqMessages([]); setGoogleMessages([]);
     setImage(null);
     stopSpeaking();
+    setFocusedProvider(null);
     if (window.innerWidth < 1024) setSidebarOpen(false);
   };
 
@@ -283,19 +288,13 @@ export default function Home() {
     recognition.start();
   };
 
-  // ✅ ROBUST TTS TOGGLE
   const toggleSpeak = (text: string, msgId: string) => {
-    // If currently speaking THIS message, stop it.
     if (isSpeaking && speakingMessageId === msgId) {
         stopSpeaking();
         return;
     }
-
-    // Otherwise, stop whatever was playing and start this one
     window.speechSynthesis.cancel();
-    
     const utterance = new SpeechSynthesisUtterance(text);
-    // Optional: Select a better voice
     const voices = window.speechSynthesis.getVoices();
     const preferredVoice = voices.find(v => v.name.includes('Google US English') || v.name.includes('Samantha'));
     if (preferredVoice) utterance.voice = preferredVoice;
@@ -391,15 +390,25 @@ export default function Home() {
     const tempId = 'temp_user_' + Date.now();
     const userMsg: Message = { id: tempId, role: 'user', content: cleanInput, image: image, provider: 'google' };
 
-    setGoogleMessages(prev => [...prev, userMsg]);
-    setGroqMessages(prev => [...prev, { ...userMsg, provider: 'groq' }]);
+    // Update Local State based on active mode
+    if (!focusedProvider || focusedProvider === 'google') setGoogleMessages(prev => [...prev, userMsg]);
+    if (!focusedProvider || focusedProvider === 'groq') setGroqMessages(prev => [...prev, { ...userMsg, provider: 'groq' }]);
 
-    const promises = [
-        addDoc(collection(db, 'chats'), { sessionId: activeSessionId, role: 'user', content: cleanInput, image: image, provider: 'google', createdAt: serverTimestamp() }),
-        streamAnswer('google', [...googleMessages, userMsg], activeSessionId!, controller.signal, image),
-        addDoc(collection(db, 'chats'), { sessionId: activeSessionId, role: 'user', content: cleanInput, provider: 'groq', createdAt: serverTimestamp() }),
-        streamAnswer('groq', [...groqMessages, { ...userMsg, provider: 'groq' }], activeSessionId!, controller.signal, image) 
-    ];
+    const promises = [];
+
+    // Log user message to DB
+    promises.push(addDoc(collection(db, 'chats'), { sessionId: activeSessionId, role: 'user', content: cleanInput, image: image, provider: 'google', createdAt: serverTimestamp() }));
+    if (!focusedProvider) {
+        promises.push(addDoc(collection(db, 'chats'), { sessionId: activeSessionId, role: 'user', content: cleanInput, provider: 'groq', createdAt: serverTimestamp() }));
+    }
+
+    // Trigger AI Streams
+    if (!focusedProvider || focusedProvider === 'google') {
+        promises.push(streamAnswer('google', [...googleMessages, userMsg], activeSessionId!, controller.signal, image));
+    }
+    if (!focusedProvider || focusedProvider === 'groq') {
+        promises.push(streamAnswer('groq', [...groqMessages, { ...userMsg, provider: 'groq' }], activeSessionId!, controller.signal, image));
+    }
 
     await Promise.all(promises);
     setLoading(false);
@@ -490,75 +499,106 @@ export default function Home() {
       <main className="flex-1 flex flex-col h-[100dvh] relative bg-[#131314] w-full min-w-0">
         
         {/* HEADER (Floating) */}
-        <div className="flex-none h-16 flex items-center px-4 z-20 absolute top-0 w-full bg-transparent">
-          <button 
-            onClick={() => setSidebarOpen(true)} 
-            className={`p-2 text-gray-400 hover:bg-[#2c2d2e]/80 hover:text-white rounded-full transition-colors mr-3 active:scale-95 backdrop-blur-sm ${sidebarOpen ? 'lg:hidden opacity-0 pointer-events-none' : 'opacity-100'}`}
-          >
-            <Menu size={24} />
-          </button>
-
-          {!currentSessionId && groqMessages.length === 0 && <span className="text-base md:text-lg font-medium text-gray-500 mx-auto pointer-events-none tracking-tight opacity-50">TurboLearn AI</span>}
-          
-          {isSpeaking && (
-            <button onClick={stopSpeaking} className="ml-auto flex items-center gap-2 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 backdrop-blur-md text-red-400 px-4 py-1.5 rounded-full shadow-lg transition-all animate-pulse text-xs font-bold z-50">
-              <VolumeX size={14} /> <span className="hidden md:inline">Stop Reading</span>
+        <div className="flex-none h-16 flex items-center px-4 z-20 absolute top-0 w-full bg-transparent pointer-events-none">
+          {/* Header content only visible when standard view, otherwise hidden to not obstruct focus mode */}
+          <div className={`flex items-center w-full pointer-events-auto ${focusedProvider ? 'hidden' : ''}`}>
+            <button 
+              onClick={() => setSidebarOpen(true)} 
+              className={`p-2 text-gray-400 hover:bg-[#2c2d2e]/80 hover:text-white rounded-full transition-colors mr-3 active:scale-95 backdrop-blur-sm ${sidebarOpen ? 'lg:hidden opacity-0 pointer-events-none' : 'opacity-100'}`}
+            >
+              <Menu size={24} />
             </button>
-          )}
+
+            {!currentSessionId && groqMessages.length === 0 && <span className="text-base md:text-lg font-medium text-gray-500 mx-auto pointer-events-none tracking-tight opacity-50">TurboLearn AI</span>}
+            
+            {isSpeaking && (
+              <button onClick={stopSpeaking} className="ml-auto flex items-center gap-2 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 backdrop-blur-md text-red-400 px-4 py-1.5 rounded-full shadow-lg transition-all animate-pulse text-xs font-bold z-50">
+                <VolumeX size={14} /> <span className="hidden md:inline">Stop Reading</span>
+              </button>
+            )}
+          </div>
         </div>
 
         {/* CHAT SCROLL AREA */}
-        <div className="flex-1 overflow-y-auto custom-scrollbar p-3 md:p-6 pb-0 pt-20">
-          <div className={`mx-auto grid grid-cols-1 lg:grid-cols-2 gap-6 h-full pb-40 transition-all duration-300 ${sidebarOpen ? 'max-w-6xl' : 'max-w-7xl'}`}>
+        <div className="flex-1 overflow-y-auto custom-scrollbar p-3 md:p-6 pb-0 pt-16">
+          <div className={`mx-auto h-full pb-40 transition-all duration-300 ${focusedProvider ? 'max-w-5xl' : (sidebarOpen ? 'max-w-6xl grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6' : 'max-w-7xl grid grid-cols-1 lg:grid-cols-2 gap-6')}`}>
             
             {/* GROQ CARD */}
-            <div className="flex flex-col rounded-2xl bg-[#1e1f20] border border-[#2c2d2e] shadow-xl relative min-h-[250px] lg:min-h-0 overflow-hidden">
-              <div className="flex items-center gap-2 px-5 py-3 bg-[#1e1f20]/90 backdrop-blur-sm border-b border-[#2c2d2e] sticky top-0 z-10">
-                <Cpu size={16} className="text-orange-400" />
-                <span className="font-semibold text-gray-200 text-xs md:text-sm tracking-wide">Llama 3.3 (Reasoning)</span>
-              </div>
-              <div className="flex-1 p-4 md:p-5 overflow-y-auto custom-scrollbar">
-                {!currentSessionId && groqMessages.length === 0 && <div className="h-40 md:h-full flex flex-col gap-2 items-center justify-center text-gray-700 opacity-40"><Cpu size={48} /><span className="text-xs font-medium">Ready</span></div>}
-                {groqMessages.map((m, i) => (
-                  <div key={i} className={`mb-6 flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                    <div className={`max-w-[95%] md:max-w-[90%] ${m.role === 'user' ? 'bg-[#2c2d2e] px-4 py-3 rounded-2xl rounded-tr-none' : ''}`}>
-                      <div className="prose prose-invert max-w-none text-gray-100 text-sm leading-relaxed break-words">
-                          {m.role === 'user' ? <p>{m.content}</p> : <MarkdownRenderer content={m.content} msgId={m.id || `groq-${i}`} isSpeaking={speakingMessageId === (m.id || `groq-${i}`)} onToggleSpeak={toggleSpeak} />}
+            {(!focusedProvider || focusedProvider === 'groq') && (
+              <div className={`flex flex-col rounded-2xl bg-[#1e1f20] border border-[#2c2d2e] shadow-xl relative overflow-hidden transition-all duration-300
+                ${focusedProvider === 'groq' ? 'h-full border-orange-500/30 shadow-[0_0_50px_rgba(249,115,22,0.1)]' : 'min-h-[40vh] lg:min-h-0'}
+              `}>
+                <div className="flex items-center justify-between px-5 py-3 bg-[#1e1f20]/90 backdrop-blur-sm border-b border-[#2c2d2e] sticky top-0 z-10">
+                  <div className="flex items-center gap-2">
+                    {focusedProvider === 'groq' && <button onClick={() => setFocusedProvider(null)}><ArrowLeft size={18} className="text-gray-400 hover:text-white mr-2" /></button>}
+                    <Cpu size={16} className="text-orange-400" />
+                    <span className="font-semibold text-gray-200 text-xs md:text-sm tracking-wide">Llama 3.3 (Reasoning)</span>
+                  </div>
+                  <button 
+                    onClick={() => setFocusedProvider(focusedProvider === 'groq' ? null : 'groq')}
+                    className="p-1.5 text-gray-500 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
+                    title={focusedProvider === 'groq' ? "Minimize" : "Focus Mode"}
+                  >
+                    {focusedProvider === 'groq' ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+                  </button>
+                </div>
+                <div className="flex-1 p-4 md:p-5 overflow-y-auto custom-scrollbar">
+                  {!currentSessionId && groqMessages.length === 0 && <div className="h-40 md:h-full flex flex-col gap-2 items-center justify-center text-gray-700 opacity-40"><Cpu size={48} /><span className="text-xs font-medium">Ready</span></div>}
+                  {groqMessages.map((m, i) => (
+                    <div key={i} className={`mb-6 flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                      <div className={`max-w-[95%] md:max-w-[90%] ${m.role === 'user' ? 'bg-[#2c2d2e] px-4 py-3 rounded-2xl rounded-tr-none' : ''}`}>
+                        <div className="prose prose-invert max-w-none text-gray-100 text-sm leading-relaxed break-words">
+                            {m.role === 'user' ? <p>{m.content}</p> : <MarkdownRenderer content={m.content} msgId={m.id || `groq-${i}`} isSpeaking={speakingMessageId === (m.id || `groq-${i}`)} onToggleSpeak={toggleSpeak} />}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
-                <div ref={groqEndRef} />
+                  ))}
+                  <div ref={groqEndRef} />
+                </div>
               </div>
-            </div>
+            )}
 
             {/* GEMINI CARD */}
-            <div className="flex flex-col rounded-2xl bg-[#1e1f20] border border-[#2c2d2e] shadow-xl min-h-[250px] lg:min-h-0 overflow-hidden">
-              <div className="flex items-center gap-2 px-5 py-3 bg-[#1e1f20]/90 backdrop-blur-sm border-b border-[#2c2d2e] sticky top-0 z-10">
-                <Sparkles size={16} className="text-blue-400" />
-                <span className="font-semibold text-gray-200 text-xs md:text-sm tracking-wide">Gemini 2.5 (Vision)</span>
-              </div>
-              <div className="flex-1 p-4 md:p-5 overflow-y-auto custom-scrollbar">
-                {!currentSessionId && googleMessages.length === 0 && <div className="h-40 md:h-full flex flex-col gap-2 items-center justify-center text-gray-700 opacity-40"><Sparkles size={48} /><span className="text-xs font-medium">Ready</span></div>}
-                {googleMessages.map((m, i) => (
-                  <div key={i} className={`mb-6 flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                    <div className={`max-w-[95%] md:max-w-[90%] ${m.role === 'user' ? 'bg-[#2c2d2e] px-4 py-3 rounded-2xl rounded-tr-none' : ''}`}>
-                       {m.image && (<div className="mb-3"><img src={m.image} alt="Upload" className="max-h-48 rounded-lg border border-[#3c3d3e] object-contain bg-black/50" /></div>)}
-                       <div className="prose prose-invert max-w-none text-gray-100 text-sm leading-relaxed break-words">
-                         {m.role === 'user' ? <p>{m.content}</p> : <MarkdownRenderer content={m.content} msgId={m.id || `google-${i}`} isSpeaking={speakingMessageId === (m.id || `google-${i}`)} onToggleSpeak={toggleSpeak} />}
+            {(!focusedProvider || focusedProvider === 'google') && (
+              <div className={`flex flex-col rounded-2xl bg-[#1e1f20] border border-[#2c2d2e] shadow-xl overflow-hidden transition-all duration-300
+                ${focusedProvider === 'google' ? 'h-full border-blue-500/30 shadow-[0_0_50px_rgba(59,130,246,0.1)]' : 'min-h-[40vh] lg:min-h-0'}
+              `}>
+                <div className="flex items-center justify-between px-5 py-3 bg-[#1e1f20]/90 backdrop-blur-sm border-b border-[#2c2d2e] sticky top-0 z-10">
+                  <div className="flex items-center gap-2">
+                    {focusedProvider === 'google' && <button onClick={() => setFocusedProvider(null)}><ArrowLeft size={18} className="text-gray-400 hover:text-white mr-2" /></button>}
+                    <Sparkles size={16} className="text-blue-400" />
+                    <span className="font-semibold text-gray-200 text-xs md:text-sm tracking-wide">Gemini 2.5 (Vision)</span>
+                  </div>
+                  <button 
+                    onClick={() => setFocusedProvider(focusedProvider === 'google' ? null : 'google')}
+                    className="p-1.5 text-gray-500 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
+                    title={focusedProvider === 'google' ? "Minimize" : "Focus Mode"}
+                  >
+                    {focusedProvider === 'google' ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+                  </button>
+                </div>
+                <div className="flex-1 p-4 md:p-5 overflow-y-auto custom-scrollbar">
+                  {!currentSessionId && googleMessages.length === 0 && <div className="h-40 md:h-full flex flex-col gap-2 items-center justify-center text-gray-700 opacity-40"><Sparkles size={48} /><span className="text-xs font-medium">Ready</span></div>}
+                  {googleMessages.map((m, i) => (
+                    <div key={i} className={`mb-6 flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                      <div className={`max-w-[95%] md:max-w-[90%] ${m.role === 'user' ? 'bg-[#2c2d2e] px-4 py-3 rounded-2xl rounded-tr-none' : ''}`}>
+                         {m.image && (<div className="mb-3"><img src={m.image} alt="Upload" className="max-h-48 rounded-lg border border-[#3c3d3e] object-contain bg-black/50" /></div>)}
+                         <div className="prose prose-invert max-w-none text-gray-100 text-sm leading-relaxed break-words">
+                           {m.role === 'user' ? <p>{m.content}</p> : <MarkdownRenderer content={m.content} msgId={m.id || `google-${i}`} isSpeaking={speakingMessageId === (m.id || `google-${i}`)} onToggleSpeak={toggleSpeak} />}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
-                <div ref={googleEndRef} />
+                  ))}
+                  <div ref={googleEndRef} />
+                </div>
               </div>
-            </div>
+            )}
           </div>
         </div>
 
         {/* INPUT AREA (Fixed Bottom with Glassmorphism) */}
         <div className="flex-none p-3 md:p-6 bg-gradient-to-t from-[#131314] via-[#131314] to-transparent pb-[calc(env(safe-area-inset-bottom)+12px)] absolute bottom-0 w-full z-20">
-          <div className={`mx-auto relative transition-all duration-300 ${sidebarOpen ? 'max-w-4xl' : 'max-w-5xl'}`}>
+          <div className={`mx-auto relative transition-all duration-300 ${focusedProvider ? 'max-w-3xl' : (sidebarOpen ? 'max-w-4xl' : 'max-w-5xl')}`}>
             
             {/* Image Preview */}
             {image && (
@@ -575,12 +615,12 @@ export default function Home() {
                 type="text"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder={isListening ? "Listening..." : "Ask anything or scan..."}
+                placeholder={isListening ? "Listening..." : focusedProvider ? `Talk to ${focusedProvider === 'groq' ? 'Llama' : 'Gemini'}...` : "Ask anything or scan..."}
                 className={`w-full bg-[#1e1f20]/80 backdrop-blur-xl text-gray-100 placeholder-gray-500 rounded-full py-4 pl-36 pr-28 
                   focus:outline-none focus:bg-[#1e1f20] focus:ring-1 focus:ring-white/10 focus:shadow-[0_0_20px_rgba(0,0,0,0.5)] 
                   transition-all text-[15px] border border-[#2c2d2e] shadow-xl
                   ${isListening ? 'border-red-500/50 bg-red-900/10' : ''}`}
-                style={{ fontSize: '16px' }} // Prevents iOS zoom
+                style={{ fontSize: '16px' }} 
               />
               
               {/* LEFT ACTIONS (Media) */}
@@ -607,7 +647,9 @@ export default function Home() {
                 </button>
               </div>
             </form>
-            <p className="text-center text-[10px] text-gray-600 mt-3 hidden md:block font-medium tracking-wide">TurboLearn AI • Gemini 2.5 Flash • Llama 3.3</p>
+            <p className="text-center text-[10px] text-gray-600 mt-3 hidden md:block font-medium tracking-wide">
+                {focusedProvider ? `Private Chat with ${focusedProvider === 'groq' ? 'Llama' : 'Gemini'}` : 'TurboLearn AI • Gemini 2.5 Flash • Llama 3.3'}
+            </p>
           </div>
         </div>
       </main>
