@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { adminDb } from '@/lib/firebaseAdmin'; // ✅ Switched to Admin SDK for secure server-side access
+import { verifyUser } from '@/lib/server/security'; // ✅ Import Centralized Gatekeeper
 
 // ⚠️ SECURITY: Use 'nodejs' runtime for stable database checks
 export const runtime = 'nodejs';
@@ -8,29 +8,14 @@ export async function POST(req: Request) {
   try {
     const { image, userId } = await req.json();
 
-    // --- 1. SECURITY GATEKEEPER ---
-    if (!userId) {
-      return NextResponse.json({ error: 'Unauthorized: No User ID' }, { status: 401 });
-    }
-
+    // --- 1. CENTRALIZED SECURITY CHECK ---
     try {
-      // ✅ Use Admin SDK to check user status (Bypasses RLS issues on server)
-      const userRef = adminDb.collection('users').doc(userId);
-      const userSnap = await userRef.get();
-
-      if (!userSnap.exists) {
-        return NextResponse.json({ error: 'User not found' }, { status: 403 });
-      }
-
-      const userData = userSnap.data();
-
-      // 🛑 BLOCK if Pending or Banned (Admin is exempt)
-      if (userData?.status !== 'approved' && userData?.role !== 'admin') {
-        return NextResponse.json({ error: 'Access Denied: Account not approved.' }, { status: 403 });
-      }
-    } catch (dbError) {
-      console.error("Security Check Failed:", dbError);
-      return NextResponse.json({ error: 'Security verification failed' }, { status: 500 });
+      // ✅ Uses the shared gatekeeper logic (throws if banned/missing/unauthorized)
+      await verifyUser(userId); 
+    } catch (authError: any) {
+      // Differentiate between 401 (Unauthorized) and 403 (Forbidden/Banned)
+      const status = authError.message.includes("Access Denied") ? 403 : 401;
+      return NextResponse.json({ error: authError.message }, { status });
     }
 
     // --- 2. VALIDATION ---

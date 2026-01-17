@@ -3,16 +3,17 @@ import { google } from '@ai-sdk/google';
 import { groq } from '@ai-sdk/groq';
 import { adminDb } from '@/lib/firebaseAdmin';
 import { FieldValue } from 'firebase-admin/firestore';
-import { z } from 'zod'; // ✅ Industry-grade validation
+import { z } from 'zod'; 
+import { verifyUser } from '@/lib/server/security'; // ✅ Import Centralized Gatekeeper
 
 // ⚠️ SECURITY: Must be 'nodejs' to use Firebase Admin
 export const runtime = 'nodejs';
 
-// ✅ Validation Schema (Prevents API crashes from bad inputs)
+// ✅ Validation Schema
 const AskSchema = z.object({
   messages: z.array(z.object({
     role: z.string(),
-    content: z.union([z.string(), z.array(z.any())]), // Handle text or multimodal arrays
+    content: z.union([z.string(), z.array(z.any())]), 
   })),
   provider: z.enum(['google', 'groq']),
   image: z.string().nullable().optional(),
@@ -32,36 +33,19 @@ export async function POST(req: Request) {
     
     const { messages, provider, image, userId } = parseResult.data;
 
-    // 2. SECURITY CHECK (Admin SDK)
-    if (!userId) {
-      return new Response(JSON.stringify({ error: "Unauthorized: No User ID" }), { status: 401 });
-    }
-
+    // 2. SECURITY & RATE LIMITING
     try {
       // ⚡️ SPEED FIX: Parallel Reads
-      // Fetch User & Rate Limit data simultaneously (Cuts latency by ~50%)
-      const userRef = adminDb.collection('users').doc(userId);
+      // Checks User Permissions AND fetches Rate Limit data simultaneously.
       const rateLimitRef = adminDb.collection('rate_limits').doc(userId);
       const now = Date.now();
 
-      const [userSnap, rateLimitSnap] = await Promise.all([
-        userRef.get(),
+      const [userData, rateLimitSnap] = await Promise.all([
+        verifyUser(userId), // ✅ Uses centralized logic (throws error if banned/missing)
         rateLimitRef.get()
       ]);
 
-      // --- A. User Status Check ---
-      if (!userSnap.exists) {
-        return new Response(JSON.stringify({ error: "User not found" }), { status: 403 });
-      }
-
-      const userData = userSnap.data();
-      
-      // 🛑 BLOCK if Pending or Banned (and not Admin)
-      if (userData?.status !== 'approved' && userData?.role !== 'admin') {
-         return new Response(JSON.stringify({ error: "Access Denied: Account not approved." }), { status: 403 });
-      }
-
-      // --- B. 🛡️ RATE LIMITING (Optimized: No Blocking Transactions) ---
+      // --- 🛡️ RATE LIMITING (Optimized) ---
       const RATE_LIMIT_WINDOW = 60 * 1000; // 1 Minute
       const MAX_REQUESTS = 20; // Max requests per window
 
@@ -71,29 +55,31 @@ export async function POST(req: Request) {
       const isWindowOpen = !rateData || (now - (rateData.startTime || 0) > RATE_LIMIT_WINDOW);
 
       if (isWindowOpen) {
-        // Reset window (Fire & Forget - don't await to speed up response)
-        // Note: Since we stream the response below, this usually completes safely in background.
+        // Reset window (Fire & Forget)
         rateLimitRef.set({ count: 1, startTime: now });
       } else {
         // Check Limit
         if ((rateData?.count || 0) >= MAX_REQUESTS) {
            return new Response(JSON.stringify({ error: "Too many requests. Please wait a moment." }), { status: 429 });
         }
-        // Atomic Increment (Fastest method, no locking)
+        // Atomic Increment
         rateLimitRef.update({ count: FieldValue.increment(1) });
       }
       // ----------------------------------------------------
 
-    } catch (dbError: any) {
-      console.error("🔥 Security/RateLimit Check Failed:", dbError);
-      return new Response(JSON.stringify({ error: "Security verification failed" }), { status: 500 });
+    } catch (error: any) {
+      console.error("🔥 Security/RateLimit Check Failed:", error);
+      // Map security errors to correct status codes
+      const status = error.message.includes("Access Denied") ? 403 : 
+                     error.message.includes("Unauthorized") ? 401 : 500;
+      return new Response(JSON.stringify({ error: error.message || "Security verification failed" }), { status });
     }
 
     // 3. Model Selection
     let model;
     if (provider === 'google') {
-      // ✅ FIX: Changed gemini-2.5-flash (invalid) to gemini-1.5-flash (stable)
-      model = google('gemini-2.5-flash'); 
+      // ✅ FIX: Use gemini-2.5-flash (Stable Production Model)
+      model = google('gemini-1.5-flash'); 
     } else if (provider === 'groq') {
       // ✅ Llama 3.3 Versatile: Text ONLY (Super fast reasoning)
       model = groq('llama-3.3-70b-versatile'); 
@@ -112,7 +98,6 @@ RULES:
 `;
 
     // 5. Context Window Management (Sliding Window)
-    // Only send the last 15 messages to save tokens.
     const MAX_CONTEXT_WINDOW = 15;
     const recentMessages = messages.length > MAX_CONTEXT_WINDOW 
         ? messages.slice(-MAX_CONTEXT_WINDOW) 
@@ -128,7 +113,7 @@ RULES:
           return {
             role: 'user',
             content: [
-              { type: 'text', text: m.content },
+              { type: 'text', text: m.content as string },
               { type: 'image', image: image } 
             ]
           };
