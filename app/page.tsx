@@ -7,7 +7,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { 
   Copy, Check, Terminal, Cpu, Sparkles, Plus, MessageSquare, Trash2, LogIn, LogOut, Menu, X, User as UserIcon, 
-  Image as ImageIcon, Mic, Volume2, StopCircle, VolumeX, Camera, ScanText, Maximize2, Minimize2, ArrowLeft
+  Image as ImageIcon, Mic, Volume2, StopCircle, VolumeX, Camera, ScanText, Maximize2, Minimize2, ArrowLeft, Shield
 } from 'lucide-react';
 import { db, auth } from '@/lib/firebase';
 import { signOut, onAuthStateChanged, User } from 'firebase/auth';
@@ -137,6 +137,9 @@ export default function Home() {
   // Focus Mode State
   const [focusedProvider, setFocusedProvider] = useState<'groq' | 'google' | null>(null);
 
+  // User Role State (For Admin Portal Access)
+  const [userRole, setUserRole] = useState<'user' | 'admin' | null>(null);
+
   // Media & Tools
   const [image, setImage] = useState<string | null>(null);
   const [isListening, setIsListening] = useState(false);
@@ -165,21 +168,49 @@ export default function Home() {
     }
 
     const unsubAuth = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-      setAuthLoading(false);
-      
       if (currentUser) {
+        
+        // --- REAL-TIME SECURITY CHECK ---
+        const userRef = doc(db, 'users', currentUser.uid);
+        const unsubUser = onSnapshot(userRef, (docSnap) => {
+            const data = docSnap.data();
+            if (data) {
+                // Kick user if status is revoked (unless admin)
+                if ((data.status === 'banned' || data.status === 'pending') && data.role !== 'admin') {
+                    alert("Access Revoked: Your account is pending approval or has been banned.");
+                    signOut(auth);
+                    window.location.reload();
+                    return;
+                }
+                // Store Role
+                setUserRole(data.role);
+            }
+        });
+
+        setUser(currentUser);
+        setAuthLoading(false);
+        
+        // Load Session if exists
         const savedSessionId = localStorage.getItem('turboLastSession');
         if (savedSessionId) setCurrentSessionId(savedSessionId);
 
+        // Load History List
         const q = query(collection(db, 'sessions'), where('userId', '==', currentUser.uid), orderBy('createdAt', 'desc'));
         const unsubSessions = onSnapshot(q, (snapshot) => {
           setSessions(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Session)));
         });
-        return () => unsubSessions();
+
+        // Cleanup listeners
+        return () => {
+            unsubUser();
+            unsubSessions();
+        };
+
       } else {
         setSessions([]); setGroqMessages([]); setGoogleMessages([]);
         localStorage.removeItem('turboLastSession');
+        setUser(null);
+        setAuthLoading(false);
       }
     });
     return () => unsubAuth();
@@ -334,7 +365,12 @@ export default function Home() {
       const response = await fetch('/api/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: apiHistory, provider, image: imgData }),
+        body: JSON.stringify({ 
+            messages: apiHistory, 
+            provider, 
+            image: imgData,
+            userId: user?.uid // ✅ ADDED USER ID FOR SECURITY CHECK
+        }),
         signal: signal
       });
       if (!response.body) return;
@@ -458,6 +494,16 @@ export default function Home() {
             </button>
             <span className="text-sm font-bold text-gray-200 px-2 lg:block hidden tracking-wide">TurboLearn</span>
           </div>
+
+          {/* NEW: Admin Portal Button (Only visible if role is 'admin') */}
+          {userRole === 'admin' && (
+             <button 
+               onClick={() => window.location.href='/admin'} 
+               className="flex items-center justify-center gap-2 px-4 py-3 rounded-full bg-red-900/20 text-red-400 border border-red-500/20 hover:bg-red-900/30 transition-all text-xs font-bold uppercase tracking-widest shadow-lg shadow-red-900/10 mb-1"
+             >
+               <Shield size={14} /> Admin Portal
+             </button>
+          )}
 
           <button onClick={startNewChat} className="flex items-center gap-3 px-4 py-3 rounded-full bg-gradient-to-r from-[#1a1b1c] to-[#202123] hover:from-[#333537] hover:to-[#383a3c] transition-all text-sm font-medium text-gray-200 shadow-md border border-white/5 active:scale-95">
             <Plus size={18} className="text-gray-400" /> New chat

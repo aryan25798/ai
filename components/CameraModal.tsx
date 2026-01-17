@@ -3,6 +3,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import Webcam from 'react-webcam';
 import { X, Check, RotateCcw, ScanLine, Zap, ZapOff, Sun, Moon } from 'lucide-react';
+import { auth } from '@/lib/firebase'; // ✅ Added to get userId for secure API calls
 
 // Types
 type BoundingBox = {
@@ -38,29 +39,32 @@ export default function CameraModal({ mode, onClose, onCapture, onScan }: Camera
   const [focusPoint, setFocusPoint] = useState<{x: number, y: number} | null>(null);
   const [isCameraReady, setIsCameraReady] = useState(false);
 
-  // 1. Optimized Constraints for Screens
+  // 1. Optimized Constraints for Screens (Laptop/Monitor Anti-Glare)
   const videoConstraints = {
     facingMode: 'environment',
     width: { ideal: 1920 }, 
     height: { ideal: 1080 },
-    frameRate: { ideal: 60, min: 30 }
+    frameRate: { ideal: 60, min: 30 } // High FPS reduces screen banding
   };
 
   // 2. Initialize Camera Capabilities
   const handleUserMedia = useCallback((stream: MediaStream) => {
     setIsCameraReady(true);
     const track = stream.getVideoTracks()[0];
+    
+    // Use 'any' to bypass strict TS checks for newer camera features
     const capabilities = (track as any).getCapabilities ? (track as any).getCapabilities() : {};
     const settings = track.getSettings();
 
     if (capabilities.torch) setHasTorch(true);
 
-    // Fix: Cast settings to 'any' to access exposureCompensation
+    // ✅ FIX: TypeScript Error Resolved by casting settings to 'any'
     if (capabilities.exposureCompensation) {
       setExposureRange(capabilities.exposureCompensation);
       setBrightness((settings as any).exposureCompensation || 0);
     }
 
+    // Apply "Monitor Mode" Defaults
     const advancedConstraints: any[] = [];
     if (capabilities.focusMode?.includes('continuous')) advancedConstraints.push({ focusMode: 'continuous' });
     if (capabilities.exposureMode?.includes('continuous')) advancedConstraints.push({ exposureMode: 'continuous' });
@@ -98,7 +102,7 @@ export default function CameraModal({ mode, onClose, onCapture, onScan }: Camera
     } catch (e) {}
   };
 
-  // 5. Capture Logic
+  // 5. Capture Logic (with Anti-Glare Filter)
   const capture = useCallback(() => {
     const src = webcamRef.current?.getScreenshot();
     if (!src) return;
@@ -117,6 +121,7 @@ export default function CameraModal({ mode, onClose, onCapture, onScan }: Camera
         if (ctx) {
             ctx.imageSmoothingEnabled = true;
             ctx.imageSmoothingQuality = 'high';
+            // Reduce brightness slightly to handle monitor glow, boost contrast for text
             ctx.filter = 'brightness(0.95) contrast(1.05)';
             ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
             ctx.filter = 'none'; 
@@ -134,13 +139,17 @@ export default function CameraModal({ mode, onClose, onCapture, onScan }: Camera
     };
   }, [webcamRef, mode, onCapture]);
 
-  // 6. OCR Logic
+  // 6. OCR Logic (Secure)
   const performOCR = async (base64Image: string) => {
     try {
       const res = await fetch('/api/ocr', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image: base64Image }),
+        // ✅ FIX: Pass userId for security check
+        body: JSON.stringify({ 
+            image: base64Image,
+            userId: auth.currentUser?.uid
+        }),
       });
       const data = await res.json();
       
@@ -186,13 +195,12 @@ export default function CameraModal({ mode, onClose, onCapture, onScan }: Camera
     const boxTop = Math.min(dragStart.y, y);
     const boxBottom = Math.max(dragStart.y, y);
 
-    // Find intersecting words
+    // Find intersecting words inside the drag box
     const newSelected = new Set(selectedIndices);
     ocrResult.forEach((item, index) => {
        const itemCenterX = item.box[0] + item.box[2] / 2;
        const itemCenterY = item.box[1] + item.box[3] / 2;
        
-       // Check if center of word is inside selection box
        if (itemCenterX >= boxLeft && itemCenterX <= boxRight &&
            itemCenterY >= boxTop && itemCenterY <= boxBottom) {
            newSelected.add(index);

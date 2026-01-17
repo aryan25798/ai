@@ -1,115 +1,202 @@
 'use client';
 
-import { LogIn, ArrowRight, Sparkles } from 'lucide-react';
-import { auth, googleProvider } from '@/lib/firebase';
-import { signInWithPopup } from 'firebase/auth';
+import { useState } from 'react';
+import { motion } from 'framer-motion';
+import { LogIn, ArrowRight, ShieldAlert, Clock, Lock, Sparkles, Zap, ShieldCheck, Mail, Key } from 'lucide-react';
+import { auth, googleProvider, db } from '@/lib/firebase';
+import { signInWithPopup, signInWithEmailAndPassword, signOut } from 'firebase/auth';
+import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 
 export default function Login() {
-  const handleLogin = async () => {
-    try {
-      await signInWithPopup(auth, googleProvider);
-    } catch (err) {
-      console.error("Login failed:", err);
+  const [status, setStatus] = useState<'idle' | 'loading' | 'pending' | 'banned' | 'success'>('idle');
+  const [method, setMethod] = useState<'google' | 'email'>('google');
+  
+  // Email/Pass State
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+
+  const processUser = async (user: any) => {
+    const userRef = doc(db, 'users', user.uid);
+    const userSnap = await getDoc(userRef);
+
+    if (!userSnap.exists()) {
+      // --- NEW USER LOGIC ---
+      // Auto-make admin if it matches your specific email
+      const isAdmin = user.email === 'admin@system.com';
+      
+      await setDoc(userRef, {
+        uid: user.uid,
+        email: user.email,
+        displayName: user.displayName || 'Admin',
+        photoURL: user.photoURL,
+        role: isAdmin ? 'admin' : 'user',
+        status: isAdmin ? 'approved' : 'pending',
+        createdAt: serverTimestamp(),
+        lastLogin: serverTimestamp()
+      });
+
+      if (isAdmin) {
+           setStatus('success'); 
+      } else {
+           await signOut(auth); 
+           setStatus('pending');
+      }
+    } else {
+      // --- EXISTING USER CHECK ---
+      const userData = userSnap.data();
+      await setDoc(userRef, { lastLogin: serverTimestamp() }, { merge: true });
+
+      if (userData.status === 'banned') {
+        await signOut(auth);
+        setStatus('banned');
+      } else if (userData.status === 'pending') {
+        await signOut(auth);
+        setStatus('pending');
+      } else {
+        setStatus('success');
+      }
     }
   };
 
-  return (
-    <div className="relative flex min-h-[100dvh] w-full flex-col items-center justify-center bg-black font-sans selection:bg-blue-500/30 text-white overflow-hidden px-4 sm:px-6">
-      
-      {/* --- 1. BACKGROUND EFFECTS --- */}
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[130%] h-[560px] bg-gradient-to-b from-blue-900/35 via-purple-900/20 to-transparent blur-[160px] pointer-events-none" />
-      <div className="absolute inset-0 z-0 opacity-20 pointer-events-none bg-[url('https://grainy-gradients.vercel.app/noise.svg')] brightness-100 contrast-150 mix-blend-overlay"></div>
-      <div 
-        className="absolute bottom-0 w-full h-[55vh] opacity-30 pointer-events-none"
-        style={{
-          background: 'linear-gradient(to bottom, transparent, #000 90%), linear-gradient(to right, #222 1px, transparent 1px), linear-gradient(to bottom, #222 1px, transparent 1px)',
-          backgroundSize: '36px 36px',
-          maskImage: 'linear-gradient(to bottom, transparent, black)'
-        }}
+  const handleGoogleLogin = async () => {
+    setStatus('loading');
+    try {
+      const result = await signInWithPopup(auth, googleProvider);
+      await processUser(result.user);
+    } catch (err) {
+      console.error("Login failed:", err);
+      setStatus('idle');
+    }
+  };
+
+  const handleEmailLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setStatus('loading');
+    try {
+      const result = await signInWithEmailAndPassword(auth, email, password);
+      await processUser(result.user);
+    } catch (err) {
+      alert("Invalid credentials");
+      setStatus('idle');
+    }
+  };
+
+  // --- UI STATES ---
+
+  if (status === 'pending') {
+    return (
+      <AccessDeniedScreen 
+        icon={<Clock size={48} className="text-yellow-400" />}
+        title="Approval Required"
+        description="Your account is created but waiting for admin approval."
+        subtext="Please contact Aryan (Admin) to activate access."
+        action={() => setStatus('idle')}
+        actionText="Back to Login"
       />
+    );
+  }
 
-      {/* --- 2. MAIN CARD --- */}
-      <div className="relative z-10 w-full max-w-[440px] px-6 sm:px-4">
-        
-        <div className="group relative rounded-3xl p-[1px] overflow-hidden bg-gradient-to-b from-white/20 to-white/0 shadow-[0_50px_120px_-30px_rgba(0,0,0,1)] transition-all duration-700 hover:scale-[1.02]">
+  if (status === 'banned') {
+    return (
+      <AccessDeniedScreen 
+        icon={<ShieldAlert size={48} className="text-red-500" />}
+        title="Access Revoked"
+        description="Your account has been permanently banned."
+        subtext="Contact support for appeals."
+        action={() => setStatus('idle')}
+        actionText="Back to Login"
+      />
+    );
+  }
+
+  return (
+    <div className="relative flex min-h-[100dvh] w-full items-center justify-center bg-[#030303] overflow-hidden font-sans selection:bg-indigo-500/30">
+      
+      {/* 1. Animated Background */}
+      <div className="absolute inset-0 z-0">
+        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-indigo-600/20 rounded-full blur-[120px] animate-pulse" />
+        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-blue-600/20 rounded-full blur-[120px] animate-pulse delay-700" />
+        <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-[0.03] mix-blend-overlay" />
+      </div>
+
+      {/* 2. Main Login Card */}
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.95, y: 20 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        transition={{ duration: 0.8 }}
+        className="relative z-10 w-full max-w-[420px] p-6"
+      >
+        <div className="group relative overflow-hidden rounded-[2.5rem] bg-[#0f0f10] border border-white/5 shadow-2xl">
           
-          {/* Inner Card Background */}
-          <div className="relative h-full w-full rounded-3xl bg-[#0a0a0a] p-8 sm:p-9 md:p-11">
+          <div className="relative p-10 flex flex-col items-center text-center">
             
-            {/* Inner Glow (Top) */}
-            <div className="absolute top-0 left-1/2 -translate-x-1/2 w-36 h-[3px] bg-blue-500 blur-[28px] group-hover:w-56 transition-all duration-700" />
+            {/* Logo Badge */}
+            <motion.div 
+              whileHover={{ rotate: 180, scale: 1.1 }}
+              className="w-20 h-20 mb-8 rounded-2xl bg-gradient-to-tr from-indigo-500 to-blue-600 p-[1px] shadow-lg shadow-indigo-500/20"
+            >
+               <div className="w-full h-full rounded-2xl bg-black flex items-center justify-center overflow-hidden">
+                 <img src="/icon.png" alt="Logo" className="w-full h-full object-cover opacity-90" />
+               </div>
+            </motion.div>
 
-            {/* Header Content */}
-            <div className="flex flex-col items-center text-center space-y-8">
-              
-              {/* LOGO SECTION (ENHANCED) */}
-              <div className="relative flex items-center justify-center w-28 h-28 sm:w-32 sm:h-32 rounded-3xl bg-white/5 border border-white/10 shadow-[inset_0_0_30px_rgba(255,255,255,0.04)] transition-all duration-500 group-hover:border-blue-500/50 p-3">
-                <img 
-                  src="/icon.png" 
-                  alt="TurboLearn Logo" 
-                  className="w-full h-full object-contain drop-shadow-[0_0_30px_rgba(59,130,246,0.8)] relative z-10 rounded-2xl" 
-                />
-                <div className="absolute inset-0 rounded-3xl border border-blue-500/25 animate-ping opacity-20" />
-                <Sparkles size={26} className="absolute -top-3 -right-3 text-blue-400 animate-bounce z-20" />
-              </div>
+            <h1 className="text-4xl font-bold text-white mb-2 tracking-tight">TurboLearn AI</h1>
+            <p className="text-neutral-400 text-sm mb-8">Secure dual-core reasoning engine.</p>
 
-              {/* Text */}
-              <div className="space-y-3">
-                <h1 className="text-4xl sm:text-5xl font-bold tracking-tight text-white drop-shadow-xl">
-                  TurboLearn
-                </h1>
-                <p className="text-sm sm:text-base text-neutral-400 max-w-[320px] mx-auto leading-relaxed">
-                  The next-generation dual-core reasoning engine for accelerated learning.
-                </p>
-              </div>
+            {/* Toggle Method */}
+            <div className="flex bg-white/5 rounded-lg p-1 mb-6 w-full">
+                <button onClick={() => setMethod('google')} className={`flex-1 py-2 text-xs font-medium rounded-md transition-all ${method === 'google' ? 'bg-white text-black shadow' : 'text-gray-400 hover:text-white'}`}>Google</button>
+                <button onClick={() => setMethod('email')} className={`flex-1 py-2 text-xs font-medium rounded-md transition-all ${method === 'email' ? 'bg-white text-black shadow' : 'text-gray-400 hover:text-white'}`}>Admin</button>
             </div>
 
-            {/* Divider */}
-            <div className="my-10 h-px w-full bg-gradient-to-r from-transparent via-neutral-800 to-transparent" />
-
-            {/* Action Area */}
-            <div className="space-y-5">
-              
-              {/* Shimmer Button */}
-              <button 
-                onClick={handleLogin}
-                className="group/btn relative w-full overflow-hidden rounded-xl bg-white p-[1px] focus:outline-none focus:ring-2 focus:ring-blue-500/40 active:scale-[0.97] transition-transform"
-              >
-                <span className="absolute inset-[-300%] animate-[spin_3s_linear_infinite] bg-[conic-gradient(from_90deg_at_50%_50%,#E2CBFF_0%,#3B82F6_50%,#E2CBFF_100%)]" />
-                <span className="relative flex h-13 w-full items-center justify-center gap-3 rounded-xl bg-slate-950 px-6 py-3 text-sm font-medium text-white transition-all duration-300 group-hover/btn:bg-slate-900">
-                  <LogIn size={20} className="text-blue-400" />
-                  <span>Continue with Google</span>
-                  <ArrowRight size={18} className="opacity-0 -translate-x-2 group-hover/btn:opacity-100 group-hover/btn:translate-x-0 transition-all duration-300 text-neutral-400" />
-                </span>
-              </button>
-
-              <div className="flex items-center justify-center gap-4 text-[11px] uppercase tracking-widest text-neutral-600 font-medium pt-2">
-                <span>Secure</span>
-                <span className="w-1 h-1 rounded-full bg-neutral-700" />
-                <span>Fast</span>
-                <span className="w-1 h-1 rounded-full bg-neutral-700" />
-                <span>Private</span>
-              </div>
-
-            </div>
+            {method === 'google' ? (
+                <motion.button
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                  onClick={handleGoogleLogin}
+                  disabled={status === 'loading'}
+                  className="w-full relative overflow-hidden rounded-xl bg-white text-black font-semibold h-12 flex items-center justify-center gap-3 transition-all hover:bg-neutral-200"
+                >
+                  {status === 'loading' ? <div className="w-5 h-5 border-2 border-black/30 border-t-black rounded-full animate-spin" /> : <><LogIn size={18} /> Continue with Google</>}
+                </motion.button>
+            ) : (
+                <form onSubmit={handleEmailLogin} className="w-full space-y-3">
+                    <div className="relative">
+                        <Mail size={16} className="absolute left-3 top-3.5 text-gray-500" />
+                        <input type="email" placeholder="admin@system.com" value={email} onChange={e => setEmail(e.target.value)} className="w-full bg-black/50 border border-white/10 rounded-xl py-3 pl-10 pr-4 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors" required />
+                    </div>
+                    <div className="relative">
+                        <Key size={16} className="absolute left-3 top-3.5 text-gray-500" />
+                        <input type="password" placeholder="••••••" value={password} onChange={e => setPassword(e.target.value)} className="w-full bg-black/50 border border-white/10 rounded-xl py-3 pl-10 pr-4 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors" required />
+                    </div>
+                    <motion.button
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                      type="submit"
+                      disabled={status === 'loading'}
+                      className="w-full rounded-xl bg-blue-600 text-white font-semibold h-12 flex items-center justify-center gap-2 mt-2 hover:bg-blue-500 transition-colors"
+                    >
+                      {status === 'loading' ? <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : "Admin Login"}
+                    </motion.button>
+                </form>
+            )}
+            
+            <p className="mt-6 text-[10px] text-neutral-600 flex items-center gap-2">
+              <Lock size={10} /> Access requires approval.
+            </p>
           </div>
         </div>
-
-        {/* Footer */}
-        <div className="mt-10 text-center space-y-4">
-          <p className="text-[10px] text-neutral-500">
-            By accessing TurboLearn, you agree to our{' '}
-            <span className="underline decoration-neutral-700 hover:text-neutral-300 cursor-pointer transition-colors">Terms</span>{' '}
-            and{' '}
-            <span className="underline decoration-neutral-700 hover:text-neutral-300 cursor-pointer transition-colors">Privacy Policy</span>.
-          </p>
-
-          <p className="text-[11px] tracking-widest uppercase text-neutral-600">
-            Built by <span className="text-neutral-400 font-medium">Aryan</span>
-          </p>
-        </div>
-
-      </div>
+      </motion.div>
     </div>
   );
 }
+
+const AccessDeniedScreen = ({ icon, title, description, subtext, action, actionText }: any) => (
+  <div className="min-h-screen w-full bg-black flex flex-col items-center justify-center p-6 text-center animate-in fade-in zoom-in duration-500">
+    <div className="w-24 h-24 rounded-full bg-white/5 flex items-center justify-center mb-6 animate-pulse border border-white/10">{icon}</div>
+    <h2 className="text-3xl font-bold text-white mb-3">{title}</h2>
+    <p className="text-neutral-400 max-w-md text-base leading-relaxed mb-4">{description}</p>
+    <p className="text-indigo-400 font-medium text-sm mb-10 p-2 px-4 bg-indigo-500/10 rounded-lg border border-indigo-500/20">{subtext}</p>
+    <button onClick={action} className="px-8 py-3 rounded-full bg-white text-black font-bold hover:bg-neutral-200 transition-colors flex items-center gap-2"><ArrowRight size={18} /> {actionText}</button>
+  </div>
+);

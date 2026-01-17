@@ -1,29 +1,54 @@
 import { NextResponse } from 'next/server';
+import { db } from '@/lib/firebase';
+import { doc, getDoc } from 'firebase/firestore';
 
-export const runtime = 'edge';
+// ⚠️ SECURITY: Use 'nodejs' runtime for stable database checks
+export const runtime = 'nodejs';
 
 export async function POST(req: Request) {
   try {
-    const { image } = await req.json();
+    const { image, userId } = await req.json();
 
+    // --- 1. SECURITY GATEKEEPER ---
+    if (!userId) {
+      return NextResponse.json({ error: 'Unauthorized: No User ID' }, { status: 401 });
+    }
+
+    try {
+      const userRef = doc(db, 'users', userId);
+      const userSnap = await getDoc(userRef);
+
+      if (!userSnap.exists()) {
+        return NextResponse.json({ error: 'User not found' }, { status: 403 });
+      }
+
+      const userData = userSnap.data();
+
+      // 🛑 BLOCK if Pending or Banned (Admin is exempt)
+      if (userData.status !== 'approved' && userData.role !== 'admin') {
+        return NextResponse.json({ error: 'Access Denied: Account not approved.' }, { status: 403 });
+      }
+    } catch (dbError) {
+      console.error("Security Check Failed:", dbError);
+      return NextResponse.json({ error: 'Security verification failed' }, { status: 500 });
+    }
+
+    // --- 2. VALIDATION ---
     if (!image) {
       return NextResponse.json({ error: 'No image provided' }, { status: 400 });
     }
 
-    // 1. Get API Key
     const apiKey = process.env.GOOGLE_VISION_API_KEY;
     if (!apiKey) {
       return NextResponse.json({ error: 'API Key missing' }, { status: 500 });
     }
 
+    // --- 3. PREPARE REQUEST ---
     const url = `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`;
-
-    // 2. Prepare Image
     const base64Image = image.includes('base64,') 
       ? image.split('base64,')[1] 
       : image;
 
-    // 3. Request TEXT_DETECTION (includes bounding boxes)
     const requestBody = {
       requests: [
         {
@@ -33,7 +58,7 @@ export async function POST(req: Request) {
       ],
     };
 
-    // 4. Call Google Vision API
+    // --- 4. CALL GOOGLE VISION API ---
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -50,36 +75,32 @@ export async function POST(req: Request) {
     const responses = data.responses?.[0];
     const annotations = responses?.textAnnotations;
 
-    // Handle no text found
     if (!annotations || annotations.length === 0) {
       return NextResponse.json({ items: [] });
     }
 
-    // 5. Determine Image Dimensions
-    // We need the original image size to convert pixel coordinates to percentages.
-    // fullTextAnnotation.pages[0] usually contains the image width/height.
+    // --- 5. PROCESS COORDINATES ---
     let imgWidth = 0;
     let imgHeight = 0;
 
+    // Try to get dimensions from metadata
     if (responses.fullTextAnnotation?.pages?.[0]) {
         imgWidth = responses.fullTextAnnotation.pages[0].width;
         imgHeight = responses.fullTextAnnotation.pages[0].height;
     } 
     
-    // Fallback: If dimensions aren't provided, estimate from the full-text bounding box (Index 0)
+    // Fallback: Estimate from bounding box if metadata is missing
     if (!imgWidth || !imgHeight) {
         const fullVertices = annotations[0].boundingPoly?.vertices || [];
         imgWidth = Math.max(...fullVertices.map((v: any) => v.x || 0));
         imgHeight = Math.max(...fullVertices.map((v: any) => v.y || 0));
     }
 
-    // 6. Map Annotations to "Lens" Format
-    // We skip index 0 because it contains the entire text block. We want individual words (indices 1+).
+    // Map annotations to "Lens" format (Percentages)
     const items = annotations.slice(1).map((ann: any) => {
       const vertices = ann.boundingPoly?.vertices;
       if (!vertices) return null;
 
-      // Find min/max X and Y to define the rectangle
       const xs = vertices.map((v: any) => v.x || 0);
       const ys = vertices.map((v: any) => v.y || 0);
       
@@ -88,14 +109,13 @@ export async function POST(req: Request) {
       const w = Math.max(...xs) - x;
       const h = Math.max(...ys) - y;
 
-      // Convert to Percentages (0-100) for CSS positioning
       return {
         text: ann.description,
         box: [
-          (x / imgWidth) * 100, // left
-          (y / imgHeight) * 100, // top
-          (w / imgWidth) * 100, // width
-          (h / imgHeight) * 100 // height
+          (x / imgWidth) * 100, // left %
+          (y / imgHeight) * 100, // top %
+          (w / imgWidth) * 100, // width %
+          (h / imgHeight) * 100 // height %
         ]
       };
     }).filter(Boolean);

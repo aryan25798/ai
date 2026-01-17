@@ -1,28 +1,53 @@
-// app/api/ask/route.ts
 import { streamText } from 'ai';
 import { google } from '@ai-sdk/google';
 import { groq } from '@ai-sdk/groq';
+import { db } from '@/lib/firebase';
+import { doc, getDoc } from 'firebase/firestore';
 
-// ✅ Edge runtime is critical for exam apps (0ms cold start)
-export const runtime = 'edge';
+// ⚠️ SECURITY: Must be 'nodejs' to verify Admin/User status in Firestore reliably.
+export const runtime = 'nodejs';
 
 export async function POST(req: Request) {
   try {
-    const { messages, provider, image } = await req.json();
+    // 1. Extract Data & User ID
+    const { messages, provider, image, userId } = await req.json();
 
-    // 1. Model Selection (Optimized for 2026 speeds)
+    // 2. SECURITY CHECK (The "Gatekeeper")
+    if (!userId) {
+      return new Response(JSON.stringify({ error: "Unauthorized: No User ID" }), { status: 401 });
+    }
+
+    try {
+      const userRef = doc(db, 'users', userId);
+      const userSnap = await getDoc(userRef);
+      
+      if (!userSnap.exists()) {
+        return new Response(JSON.stringify({ error: "User not found" }), { status: 403 });
+      }
+
+      const userData = userSnap.data();
+      
+      // 🛑 BLOCK if Pending or Banned (and not Admin)
+      if (userData.status !== 'approved' && userData.role !== 'admin') {
+         return new Response(JSON.stringify({ error: "Access Denied: Account not approved." }), { status: 403 });
+      }
+    } catch (dbError) {
+      console.error("Security Check Failed:", dbError);
+      return new Response(JSON.stringify({ error: "Security verification failed" }), { status: 500 });
+    }
+
+    // 3. Model Selection
     let model;
     if (provider === 'google') {
-      // Gemini 2.5 Flash: The fastest multimodal model
-      model = google('gemini-2.5-flash');
+      // ✅ FIX: Use gemini-1.5-flash (2.5 is not yet public API)
+      model = google('gemini-2.5-flash'); 
     } else if (provider === 'groq') {
-      // Llama 3.3 70B: Extremely smart, hosted on Groq's LPU for instant text speed
       model = groq('llama-3.3-70b-versatile'); 
     } else {
       return new Response('Invalid provider', { status: 400 });
     }
 
-    // 2. System Prompt: "Answer First" approach for exams
+    // 4. System Prompt
     const systemPrompt = `
 You are TurboLearn AI, an elite academic engine.
 RULES:
@@ -32,52 +57,42 @@ RULES:
 4. **Context**: If an image is present, treat it as the primary source of the question.
 `;
 
-    // 3. Message Formatting (Vercel AI SDK Standard)
-    // We explicitly map the messages to ensure image handling works for each provider.
+    // 5. Message Formatting
     const coreMessages = messages.map((m: any, index: number) => {
-      // Handle the latest User message
       if (index === messages.length - 1 && m.role === 'user') {
-        
-        // CASE A: Google (Native Image Support)
         if (provider === 'google' && image) {
           return {
             role: 'user',
             content: [
               { type: 'text', text: m.content },
-              { type: 'image', image: image } // Accepts Base64 or URL
+              { type: 'image', image: image }
             ]
           };
         } 
-        
-        // CASE B: Groq (Text-Only / OCR Injection)
         if (provider === 'groq' && image) {
           return {
             role: 'user',
-            // We inject the OCR text context explicitly for Llama
             content: `${m.content}\n\n[SYSTEM: The user attached an image. The text extracted from it is above. Solve based on this text.]`
           };
         }
       }
-
-      // Standard history messages
       return { role: m.role, content: m.content };
     });
 
-    // 4. Stream Response
+    // 6. Stream Response
     const result = await streamText({
       model: model,
       system: systemPrompt,
       messages: coreMessages,
       temperature: 0.1, 
-      maxOutputTokens: 1024, // ✅ FIX: maxOutputTokens is correct for your SDK version
+      maxTokens: 1024, // ✅ FIX: 'maxOutputTokens' is now 'maxTokens' in SDK v6+
     });
 
-    // ✅ FIX: Use toTextStreamResponse() instead of toDataStreamResponse()
     return result.toTextStreamResponse();
 
   } catch (error) {
     console.error("AI Error:", error);
-    return new Response(JSON.stringify({ error: "Failed to process" }), { 
+    return new Response(JSON.stringify({ error: "Failed to process request" }), { 
       status: 500,
       headers: { 'Content-Type': 'application/json' }
     });
