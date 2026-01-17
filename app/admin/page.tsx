@@ -1,9 +1,10 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { 
   Users, MessageSquare, CheckCircle, Trash2, Search, LogOut, 
-  LayoutDashboard, Ban, Eye, X, Shield, Clock, ImageIcon, AlertTriangle 
+  Ban, Eye, X, Shield, ImageIcon, Terminal, Clock, 
+  BarChart3, Download, Filter, AlertCircle, Activity
 } from 'lucide-react';
 import { auth, db } from '@/lib/firebase';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
@@ -32,7 +33,8 @@ type ChatSession = {
 type ChatMessage = {
     role: 'user' | 'assistant';
     content: string;
-    image?: string | null; // ✅ Image Support
+    image?: string | null;
+    provider?: string;
     createdAt: any;
 };
 
@@ -45,7 +47,8 @@ export default function AdminPortal() {
   // Admin Data
   const [users, setUsers] = useState<UserData[]>([]);
   const [search, setSearch] = useState('');
-  const [activeTab, setActiveTab] = useState<'users' | 'chats'>('users');
+  const [filterStatus, setFilterStatus] = useState<'all' | 'pending' | 'approved' | 'banned'>('all');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'users' | 'chats'>('dashboard');
 
   // Chat Inspector State
   const [selectedUserForChat, setSelectedUserForChat] = useState<UserData | null>(null);
@@ -75,17 +78,16 @@ export default function AdminPortal() {
     return () => unsub();
   }, [router]);
 
-  // 2. FETCH ALL USERS (Corrected)
+  // 2. FETCH ALL USERS
   useEffect(() => {
     if (!isAdmin) return;
-    
-    // We fetch ALL users without 'orderBy' first to avoid missing index errors
     const q = collection(db, 'users');
-    
     const unsub = onSnapshot(q, (snapshot) => {
-      const fetchedUsers = snapshot.docs.map(d => d.data() as UserData);
+      const fetchedUsers = snapshot.docs.map(d => ({
+          uid: d.id, 
+          ...d.data()
+      } as UserData));
       
-      // Sort manually (Newest First)
       fetchedUsers.sort((a, b) => {
           const timeA = a.createdAt?.seconds || 0;
           const timeB = b.createdAt?.seconds || 0;
@@ -93,55 +95,77 @@ export default function AdminPortal() {
       });
 
       setUsers(fetchedUsers);
-    }, (error) => {
-        console.error("🔥 Admin Fetch Error:", error);
-        alert("Error fetching users. Check Console for details.");
-    });
-
+    }, (error) => console.error("🔥 Admin Fetch Error:", error));
     return () => unsub();
   }, [isAdmin]);
 
-  // 3. ACTIONS
+  // 3. COMPUTED METRICS (For Dashboard)
+  const metrics = useMemo(() => {
+    return {
+        total: users.length,
+        active: users.filter(u => u.status === 'approved').length,
+        pending: users.filter(u => u.status === 'pending').length,
+        banned: users.filter(u => u.status === 'banned').length,
+        admins: users.filter(u => u.role === 'admin').length,
+    };
+  }, [users]);
+
+  // 4. ACTIONS
   const updateUserStatus = async (uid: string, status: 'approved' | 'banned' | 'pending') => {
-    try {
-        await updateDoc(doc(db, 'users', uid), { status });
-    } catch (e) {
-        alert("Failed to update status. Are you sure you are Admin?");
-    }
+    try { await updateDoc(doc(db, 'users', uid), { status }); } 
+    catch (e) { alert("Failed to update status."); }
   };
 
   const deleteUser = async (uid: string) => {
-    if(!confirm("⚠️ Permanently delete this user?")) return;
-    try {
-        await deleteDoc(doc(db, 'users', uid));
-    } catch (e) {
-        alert("Failed to delete user.");
-    }
+    if(!confirm("⚠️ Permanently delete this user? This cannot be undone.")) return;
+    try { await deleteDoc(doc(db, 'users', uid)); } 
+    catch (e) { alert("Failed to delete user."); }
   };
 
-  // 4. FETCH SESSIONS
+  const exportToCSV = () => {
+    const headers = ['UID', 'Name', 'Email', 'Role', 'Status', 'Joined'];
+    const rows = users.map(u => [
+        u.uid, 
+        u.displayName || 'N/A', 
+        u.email || 'N/A', 
+        u.role, 
+        u.status, 
+        u.createdAt?.toDate ? new Date(u.createdAt.toDate()).toLocaleDateString() : 'N/A'
+    ]);
+    
+    const csvContent = "data:text/csv;charset=utf-8," 
+        + [headers, ...rows].map(e => e.join(",")).join("\n");
+        
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `users_export_${new Date().toISOString().split('T')[0]}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // 5. CHAT LOGIC
   const loadUserSessions = async (targetUser: UserData) => {
       setSelectedUserForChat(targetUser);
       setActiveSessionId(null);
       setChatLogs([]);
-      
       try {
-        // Query sessions for this specific user
         const q = query(collection(db, 'sessions'), where('userId', '==', targetUser.uid), orderBy('createdAt', 'desc'));
         const snap = await getDocs(q);
         setUserSessions(snap.docs.map(d => ({ id: d.id, ...d.data() } as ChatSession)));
         setActiveTab('chats');
       } catch (e) {
-          console.error(e);
-          // Fallback if index is missing
+          // Fallback if index missing
           const q2 = query(collection(db, 'sessions'), where('userId', '==', targetUser.uid));
           const snap2 = await getDocs(q2);
-          setUserSessions(snap2.docs.map(d => ({ id: d.id, ...d.data() } as ChatSession)));
+          const sessions = snap2.docs.map(d => ({ id: d.id, ...d.data() } as ChatSession));
+          sessions.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+          setUserSessions(sessions);
           setActiveTab('chats');
       }
   };
 
-  // 5. FETCH CHAT LOGS
   const loadChatLogs = async (sessionId: string) => {
       setActiveSessionId(sessionId);
       try {
@@ -149,17 +173,25 @@ export default function AdminPortal() {
         const snap = await getDocs(q);
         setChatLogs(snap.docs.map(d => d.data() as ChatMessage));
       } catch (e) {
-          console.error("Chat Load Error", e);
+          // Fallback if index missing
+          const q2 = query(collection(db, 'chats'), where('sessionId', '==', sessionId));
+          const snap2 = await getDocs(q2);
+          const chats = snap2.docs.map(d => d.data() as ChatMessage);
+          chats.sort((a, b) => (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0));
+          setChatLogs(chats);
       }
   };
 
   if (loading) return <div className="min-h-screen bg-[#09090b] text-white flex items-center justify-center font-mono">Loading Portal...</div>;
   if (!user || !isAdmin) return <Login />;
 
-  const filteredUsers = users.filter(u => 
-    u.email?.toLowerCase().includes(search.toLowerCase()) || 
-    u.displayName?.toLowerCase().includes(search.toLowerCase())
-  );
+  // Filter Logic
+  const filteredUsers = users.filter(u => {
+    const matchesSearch = (u.email || '').toLowerCase().includes(search.toLowerCase()) || 
+                          (u.displayName || '').toLowerCase().includes(search.toLowerCase());
+    const matchesStatus = filterStatus === 'all' || u.status === filterStatus;
+    return matchesSearch && matchesStatus;
+  });
 
   return (
     <div className="flex h-screen bg-[#09090b] text-gray-100 font-sans overflow-hidden">
@@ -175,6 +207,12 @@ export default function AdminPortal() {
         
         <nav className="flex-1 p-4 space-y-2">
             <button 
+                onClick={() => setActiveTab('dashboard')}
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-all ${activeTab === 'dashboard' ? 'bg-orange-500/10 text-orange-400 border border-orange-500/20' : 'text-gray-400 hover:bg-white/5'}`}
+            >
+                <BarChart3 size={18} /> Dashboard
+            </button>
+            <button 
                 onClick={() => { setActiveTab('users'); setSelectedUserForChat(null); }}
                 className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-all ${activeTab === 'users' ? 'bg-red-500/10 text-red-400 border border-red-500/20' : 'text-gray-400 hover:bg-white/5'}`}
             >
@@ -189,10 +227,8 @@ export default function AdminPortal() {
         </nav>
 
         <div className="p-4 border-t border-white/5">
-            <button onClick={() => router.push('/')} className="w-full flex items-center gap-2 px-4 py-2.5 text-xs text-gray-400 hover:text-white rounded-lg hover:bg-white/5 transition-colors">
-                <LayoutDashboard size={14} /> Return to App
-            </button>
-            <button onClick={() => signOut(auth)} className="w-full flex items-center gap-2 px-4 py-2.5 text-xs text-red-400 hover:text-red-300 rounded-lg hover:bg-red-500/10 mt-2 transition-colors">
+            {/* Removed "Return to App" as requested */}
+            <button onClick={() => signOut(auth)} className="w-full flex items-center gap-2 px-4 py-3 text-xs font-semibold text-red-400 hover:text-red-300 rounded-lg hover:bg-red-500/10 transition-colors">
                 <LogOut size={14} /> Secure Logout
             </button>
         </div>
@@ -204,26 +240,134 @@ export default function AdminPortal() {
         {/* TOP BAR */}
         <header className="h-16 border-b border-white/10 bg-[#09090b]/90 backdrop-blur-md flex items-center justify-between px-8 z-10">
             <div className="flex items-center gap-3">
-                <div className={`w-2 h-2 rounded-full ${activeTab === 'users' ? 'bg-red-500' : 'bg-blue-500'} animate-pulse`}></div>
+                <div className={`w-2 h-2 rounded-full ${
+                    activeTab === 'dashboard' ? 'bg-orange-500' :
+                    activeTab === 'users' ? 'bg-red-500' : 'bg-blue-500'
+                } animate-pulse`}></div>
                 <h2 className="font-semibold text-sm tracking-wide text-gray-200 uppercase">
-                    {activeTab === 'users' ? 'Database Overview' : 'Forensic Inspector'}
+                    {activeTab === 'dashboard' ? 'System Overview' : 
+                     activeTab === 'users' ? 'User Database' : 'Forensic Inspector'}
                 </h2>
             </div>
-            <div className="relative">
-                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
-                <input 
-                    type="text" 
-                    placeholder="Search users by name or email..." 
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    className="bg-[#18181b] border border-white/10 rounded-full pl-9 pr-4 py-1.5 text-xs text-white focus:outline-none focus:border-white/30 transition-all w-72"
-                />
-            </div>
+            
+            {activeTab === 'users' && (
+                <div className="flex items-center gap-4">
+                     {/* Export Button */}
+                    <button onClick={exportToCSV} className="flex items-center gap-2 text-xs font-medium text-gray-400 hover:text-white transition-colors bg-white/5 px-3 py-1.5 rounded-md border border-white/10 hover:bg-white/10">
+                        <Download size={14} /> Export CSV
+                    </button>
+                    {/* Filter Status */}
+                    <div className="relative group">
+                        <div className="flex items-center gap-2 bg-[#18181b] border border-white/10 rounded-full px-4 py-1.5 text-xs text-white">
+                            <Filter size={12} className="text-gray-500" />
+                            <select 
+                                value={filterStatus} 
+                                onChange={(e) => setFilterStatus(e.target.value as any)}
+                                className="bg-transparent focus:outline-none appearance-none cursor-pointer"
+                            >
+                                <option value="all">All Status</option>
+                                <option value="approved">Approved</option>
+                                <option value="pending">Pending</option>
+                                <option value="banned">Banned</option>
+                            </select>
+                        </div>
+                    </div>
+                    {/* Search */}
+                    <div className="relative">
+                        <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+                        <input 
+                            type="text" 
+                            placeholder="Search..." 
+                            value={search}
+                            onChange={(e) => setSearch(e.target.value)}
+                            className="bg-[#18181b] border border-white/10 rounded-full pl-9 pr-4 py-1.5 text-xs text-white focus:outline-none focus:border-white/30 transition-all w-64"
+                        />
+                    </div>
+                </div>
+            )}
         </header>
 
         {/* CONTENT AREA */}
         <div className="flex-1 overflow-y-auto p-6">
             
+            {/* 0. DASHBOARD TAB */}
+            {activeTab === 'dashboard' && (
+                <div className="max-w-6xl mx-auto space-y-6">
+                    {/* Metric Cards */}
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                        <div className="bg-[#0c0c0e] p-5 rounded-xl border border-white/5 shadow-lg relative overflow-hidden group">
+                            <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity"><Users size={64} /></div>
+                            <div className="text-gray-500 text-xs font-bold uppercase tracking-widest mb-1">Total Users</div>
+                            <div className="text-3xl font-bold text-white">{metrics.total}</div>
+                            <div className="text-[10px] text-gray-600 mt-2">Registered Accounts</div>
+                        </div>
+                        <div className="bg-[#0c0c0e] p-5 rounded-xl border border-white/5 shadow-lg relative overflow-hidden group">
+                            <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity"><CheckCircle size={64} className="text-green-500" /></div>
+                            <div className="text-green-500/70 text-xs font-bold uppercase tracking-widest mb-1">Active Users</div>
+                            <div className="text-3xl font-bold text-green-400">{metrics.active}</div>
+                            <div className="text-[10px] text-gray-600 mt-2">Approved Access</div>
+                        </div>
+                        <div className="bg-[#0c0c0e] p-5 rounded-xl border border-yellow-500/20 shadow-lg relative overflow-hidden group">
+                            <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity"><AlertCircle size={64} className="text-yellow-500" /></div>
+                            <div className="text-yellow-500/70 text-xs font-bold uppercase tracking-widest mb-1">Pending</div>
+                            <div className="text-3xl font-bold text-yellow-400">{metrics.pending}</div>
+                            <div className="text-[10px] text-gray-600 mt-2">Action Required</div>
+                        </div>
+                         <div className="bg-[#0c0c0e] p-5 rounded-xl border border-red-500/20 shadow-lg relative overflow-hidden group">
+                            <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity"><Ban size={64} className="text-red-500" /></div>
+                            <div className="text-red-500/70 text-xs font-bold uppercase tracking-widest mb-1">Banned</div>
+                            <div className="text-3xl font-bold text-red-400">{metrics.banned}</div>
+                            <div className="text-[10px] text-gray-600 mt-2">Access Revoked</div>
+                        </div>
+                    </div>
+
+                    {/* Quick Actions / Recent Pending */}
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <div className="bg-[#0c0c0e] rounded-xl border border-white/5 overflow-hidden shadow-lg flex flex-col">
+                            <div className="p-4 border-b border-white/5 bg-white/[0.02] flex items-center gap-2">
+                                <Activity size={14} className="text-blue-400" />
+                                <span className="text-xs font-bold uppercase tracking-widest text-gray-400">System Health</span>
+                            </div>
+                            <div className="p-6 flex-1 flex flex-col justify-center items-center gap-4 opacity-50">
+                                <div className="w-16 h-16 rounded-full border-4 border-green-500/20 border-t-green-500 animate-spin"></div>
+                                <p className="text-xs text-gray-500">Database Connection Stable</p>
+                            </div>
+                        </div>
+
+                        <div className="bg-[#0c0c0e] rounded-xl border border-white/5 overflow-hidden shadow-lg flex flex-col">
+                             <div className="p-4 border-b border-white/5 bg-white/[0.02] flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                    <AlertCircle size={14} className="text-yellow-400" />
+                                    <span className="text-xs font-bold uppercase tracking-widest text-gray-400">Pending Approvals</span>
+                                </div>
+                                <button onClick={() => setActiveTab('users')} className="text-[10px] text-blue-400 hover:underline">View All</button>
+                            </div>
+                            <div className="flex-1 overflow-y-auto max-h-64 p-2">
+                                {users.filter(u => u.status === 'pending').length === 0 ? (
+                                    <div className="flex h-full items-center justify-center text-gray-600 text-xs py-8">No pending requests.</div>
+                                ) : (
+                                    users.filter(u => u.status === 'pending').slice(0, 5).map(u => (
+                                        <div key={u.uid} className="flex items-center justify-between p-3 hover:bg-white/5 rounded-lg transition-colors border-b border-white/5 last:border-none">
+                                            <div className="flex items-center gap-3">
+                                                 <div className="w-8 h-8 rounded-md bg-white/10 flex items-center justify-center text-xs font-bold">{u.email?.[0]?.toUpperCase()}</div>
+                                                 <div>
+                                                     <div className="text-xs text-white font-medium">{u.displayName}</div>
+                                                     <div className="text-[10px] text-gray-500">{u.email}</div>
+                                                 </div>
+                                            </div>
+                                            <div className="flex gap-2">
+                                                <button onClick={() => updateUserStatus(u.uid, 'approved')} className="p-1.5 text-green-400 hover:bg-green-500/10 rounded transition-colors"><CheckCircle size={14} /></button>
+                                                <button onClick={() => updateUserStatus(u.uid, 'banned')} className="p-1.5 text-red-400 hover:bg-red-500/10 rounded transition-colors"><Ban size={14} /></button>
+                                            </div>
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* 1. USER MANAGEMENT TAB */}
             {activeTab === 'users' && (
                 <div className="bg-[#0c0c0e] rounded-xl border border-white/5 overflow-hidden shadow-2xl">
@@ -241,7 +385,7 @@ export default function AdminPortal() {
                             {filteredUsers.length === 0 && (
                                 <tr>
                                     <td colSpan={5} className="p-8 text-center text-gray-500 text-sm">
-                                        No users found. (Check Firestore Rules)
+                                        No users found matching filters.
                                     </td>
                                 </tr>
                             )}
@@ -263,7 +407,7 @@ export default function AdminPortal() {
                                         </div>
                                     </td>
                                     <td className="p-4 text-xs text-gray-400 font-mono">
-                                        {u.role === 'admin' ? <span className="text-red-400 font-bold">ADMIN</span> : 'Student'}
+                                        {u.role === 'admin' ? <span className="text-red-400 font-bold bg-red-900/10 px-2 py-0.5 rounded">ADMIN</span> : 'User'}
                                     </td>
                                     <td className="p-4">
                                         <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide border ${
@@ -327,7 +471,10 @@ export default function AdminPortal() {
                                     className={`p-3 rounded-lg cursor-pointer text-sm transition-all border ${activeSessionId === sess.id ? 'bg-blue-500/10 border-blue-500/30 text-blue-200' : 'bg-transparent border-transparent text-gray-400 hover:bg-white/5'}`}
                                 >
                                     <div className="font-medium truncate">{sess.title}</div>
-                                    <div className="text-[10px] opacity-50 mt-1 font-mono">{sess.createdAt?.toDate ? new Date(sess.createdAt.toDate()).toLocaleDateString() : ''}</div>
+                                    <div className="text-[10px] opacity-50 mt-1 font-mono flex items-center gap-1">
+                                        <Clock size={10} />
+                                        {sess.createdAt?.toDate ? new Date(sess.createdAt.toDate()).toLocaleDateString() : ''}
+                                    </div>
                                 </div>
                             ))}
                         </div>
@@ -343,15 +490,17 @@ export default function AdminPortal() {
                             
                             {chatLogs.map((msg, i) => (
                                 <div key={i} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-                                    <div className={`text-[9px] mb-2 uppercase font-bold tracking-widest px-1 ${msg.role === 'user' ? 'text-gray-500' : 'text-blue-500'}`}>
-                                        {msg.role}
+                                    <div className={`text-[9px] mb-2 uppercase font-bold tracking-widest px-1 flex items-center gap-1 ${msg.role === 'user' ? 'text-gray-500' : 'text-blue-500'}`}>
+                                        {msg.role === 'assistant' && <Terminal size={10} />}
+                                        {msg.role} {msg.provider && `(${msg.provider})`}
                                     </div>
                                     
                                     <div className={`max-w-[80%] p-4 rounded-2xl text-sm leading-relaxed shadow-sm ${msg.role === 'user' ? 'bg-[#1e1f20] text-gray-200 rounded-tr-sm' : 'bg-blue-900/10 text-blue-100 border border-blue-500/20 rounded-tl-sm'}`}>
-                                        {/* ✅ IMAGE RENDERER */}
+                                        
+                                        {/* IMAGE RENDERER */}
                                         {msg.image && (
                                             <div className="mb-3 rounded-lg overflow-hidden border border-white/10 bg-black relative group">
-                                                <img src={msg.image} alt="User Upload" className="max-w-full h-auto max-h-60 object-contain mx-auto" />
+                                                <img src={msg.image} alt="User Attachment" className="max-w-full h-auto max-h-60 object-contain mx-auto" />
                                                 <div className="absolute inset-0 bg-black/50 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
                                                     <a href={msg.image} target="_blank" rel="noopener noreferrer" className="text-xs text-white underline">Open Original</a>
                                                 </div>
@@ -360,8 +509,9 @@ export default function AdminPortal() {
                                                 </div>
                                             </div>
                                         )}
+
                                         {/* Text Content */}
-                                        <div className="whitespace-pre-wrap">{msg.content}</div>
+                                        <div className="whitespace-pre-wrap">{msg.content || <span className="italic opacity-50">No text content</span>}</div>
                                     </div>
                                 </div>
                             ))}

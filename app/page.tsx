@@ -3,8 +3,12 @@
 import { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math'; // ✅ ADDED: For parsing math
+import rehypeKatex from 'rehype-katex'; // ✅ ADDED: For rendering math
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import 'katex/dist/katex.min.css'; // ✅ ADDED: Math CSS
+
 import { 
   Copy, Check, Terminal, Cpu, Sparkles, Plus, MessageSquare, Trash2, LogIn, LogOut, Menu, X, User as UserIcon, 
   Image as ImageIcon, Mic, Volume2, StopCircle, VolumeX, Camera, ScanText, Maximize2, Minimize2, ArrowLeft, Shield
@@ -12,7 +16,7 @@ import {
 import { db, auth } from '@/lib/firebase';
 import { signOut, onAuthStateChanged, User } from 'firebase/auth';
 import { 
-  collection, addDoc, query, where, orderBy, onSnapshot, serverTimestamp, deleteDoc, doc, getDocs, writeBatch 
+  collection, addDoc, query, where, orderBy, onSnapshot, serverTimestamp, deleteDoc, doc, getDocs, writeBatch, getDoc, setDoc, updateDoc 
 } from 'firebase/firestore';
 import Login from '@/components/Login';
 import CameraModal from '@/components/CameraModal';
@@ -101,25 +105,31 @@ const MarkdownRenderer = ({
       </button>
 
       <div className="pr-8">
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
-          code({ node, inline, className, children, ...props }: any) {
-            const match = /language-(\w+)/.exec(className || '');
-            return !inline && match ? 
-              <CodeBlock language={match[1]} code={String(children).replace(/\n$/, '')} /> : 
-              <code className="bg-[#2c2d2e] text-orange-200 px-1.5 py-0.5 rounded-md text-[13px] font-mono border border-white/5 break-words whitespace-pre-wrap" {...props}>{children}</code>;
-          },
-          p({ children }) { return <p className="mb-4 text-[15px] leading-7 text-gray-200">{children}</p>; },
-          ul({ children }) { return <ul className="list-disc pl-5 mb-4 space-y-2 text-gray-300 text-[15px] marker:text-gray-500">{children}</ul>; },
-          ol({ children }) { return <ol className="list-decimal pl-5 mb-4 space-y-2 text-gray-300 text-[15px] marker:text-gray-500">{children}</ol>; },
-          h1({ children }) { return <h1 className="text-xl md:text-2xl font-bold mb-4 text-white pb-2 border-b border-gray-700/50">{children}</h1>; },
-          h2({ children }) { return <h2 className="text-lg md:text-xl font-bold mb-3 text-white mt-6">{children}</h2>; },
-          h3({ children }) { return <h3 className="text-base md:text-lg font-bold mb-2 text-white mt-4">{children}</h3>; },
-          a({ children, href }) { return <a href={href} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 underline underline-offset-4 decoration-blue-400/30 hover:decoration-blue-400 transition-all">{children}</a>; },
-          blockquote({ children }) { return <blockquote className="border-l-4 border-blue-500/30 pl-4 py-1 my-4 bg-blue-500/5 rounded-r-lg italic text-gray-400">{children}</blockquote>; },
-          table({ children }) { return <div className="overflow-x-auto my-4 rounded-lg border border-gray-700/50"><table className="min-w-full text-left text-sm text-gray-300">{children}</table></div>; },
-          th({ children }) { return <th className="bg-[#262729] p-3 font-semibold text-white border-b border-gray-700">{children}</th>; },
-          td({ children }) { return <td className="p-3 border-b border-gray-700/50">{children}</td>; },
-        }}>{content}</ReactMarkdown>
+        <ReactMarkdown 
+          remarkPlugins={[remarkGfm, remarkMath]} // ✅ ADDED remarkMath
+          rehypePlugins={[rehypeKatex]} // ✅ ADDED rehypeKatex
+          components={{
+            code({ node, inline, className, children, ...props }: any) {
+              const match = /language-(\w+)/.exec(className || '');
+              return !inline && match ? 
+                <CodeBlock language={match[1]} code={String(children).replace(/\n$/, '')} /> : 
+                <code className="bg-[#2c2d2e] text-orange-200 px-1.5 py-0.5 rounded-md text-[13px] font-mono border border-white/5 break-words whitespace-pre-wrap" {...props}>{children}</code>;
+            },
+            p({ children }) { return <p className="mb-4 text-[15px] leading-7 text-gray-200">{children}</p>; },
+            ul({ children }) { return <ul className="list-disc pl-5 mb-4 space-y-2 text-gray-300 text-[15px] marker:text-gray-500">{children}</ul>; },
+            ol({ children }) { return <ol className="list-decimal pl-5 mb-4 space-y-2 text-gray-300 text-[15px] marker:text-gray-500">{children}</ol>; },
+            h1({ children }) { return <h1 className="text-xl md:text-2xl font-bold mb-4 text-white pb-2 border-b border-gray-700/50">{children}</h1>; },
+            h2({ children }) { return <h2 className="text-lg md:text-xl font-bold mb-3 text-white mt-6">{children}</h2>; },
+            h3({ children }) { return <h3 className="text-base md:text-lg font-bold mb-2 text-white mt-4">{children}</h3>; },
+            a({ children, href }) { return <a href={href} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 underline underline-offset-4 decoration-blue-400/30 hover:decoration-blue-400 transition-all">{children}</a>; },
+            blockquote({ children }) { return <blockquote className="border-l-4 border-blue-500/30 pl-4 py-1 my-4 bg-blue-500/5 rounded-r-lg italic text-gray-400">{children}</blockquote>; },
+            table({ children }) { return <div className="overflow-x-auto my-4 rounded-lg border border-gray-700/50"><table className="min-w-full text-left text-sm text-gray-300">{children}</table></div>; },
+            th({ children }) { return <th className="bg-[#262729] p-3 font-semibold text-white border-b border-gray-700">{children}</th>; },
+            td({ children }) { return <td className="p-3 border-b border-gray-700/50">{children}</td>; },
+          }}
+        >
+          {content}
+        </ReactMarkdown>
       </div>
     </div>
   );
@@ -167,24 +177,47 @@ export default function Home() {
         setSidebarOpen(window.innerWidth >= 1024);
     }
 
-    const unsubAuth = onAuthStateChanged(auth, (currentUser) => {
+    const unsubAuth = onAuthStateChanged(auth, async (currentUser) => {
       if (currentUser) {
         
-        // --- REAL-TIME SECURITY CHECK ---
+        // --- ✅ CRITICAL FIX: ENSURE USER DATABASE ENTRY EXISTS ---
         const userRef = doc(db, 'users', currentUser.uid);
-        const unsubUser = onSnapshot(userRef, (docSnap) => {
-            const data = docSnap.data();
-            if (data) {
-                // Kick user if status is revoked (unless admin)
-                if ((data.status === 'banned' || data.status === 'pending') && data.role !== 'admin') {
-                    alert("Access Revoked: Your account is pending approval or has been banned.");
-                    signOut(auth);
-                    window.location.reload();
-                    return;
-                }
-                // Store Role
-                setUserRole(data.role);
+        
+        try {
+            const docSnap = await getDoc(userRef);
+            if (!docSnap.exists()) {
+                await setDoc(userRef, {
+                    uid: currentUser.uid,
+                    email: currentUser.email,
+                    displayName: currentUser.displayName || 'User',
+                    photoURL: currentUser.photoURL,
+                    role: 'user', // Default Role
+                    status: 'approved', // Default Status
+                    createdAt: serverTimestamp(),
+                    lastLogin: serverTimestamp()
+                });
+            } else {
+                // Update last login timestamp
+                await updateDoc(userRef, { lastLogin: serverTimestamp() });
             }
+        } catch (err) {
+            console.error("Error creating/updating user profile:", err);
+        }
+
+        // --- REAL-TIME SECURITY CHECK & ROLE SYNC ---
+        const unsubUser = onSnapshot(userRef, (docSnap) => {
+             const data = docSnap.data();
+             if (data) {
+                 // Kick user if status is revoked (unless admin)
+                 if ((data.status === 'banned' || data.status === 'pending') && data.role !== 'admin') {
+                     alert("Access Revoked: Your account is pending approval or has been banned.");
+                     signOut(auth);
+                     window.location.reload();
+                     return;
+                 }
+                 // Store Role
+                 setUserRole(data.role);
+             }
         });
 
         setUser(currentUser);
@@ -438,13 +471,24 @@ export default function Home() {
         promises.push(addDoc(collection(db, 'chats'), { sessionId: activeSessionId, role: 'user', content: cleanInput, provider: 'groq', createdAt: serverTimestamp() }));
     }
 
-    // Trigger AI Streams
-    if (!focusedProvider || focusedProvider === 'google') {
+    // --- ✅ STRICT PROVIDER LOGIC START ---
+    // If Image: ONLY Gemini (Google)
+    // If Text Only: Both (or Focused)
+    
+    // 1. Google (Gemini) - Always runs if focused OR dual mode OR image present
+    if (image || !focusedProvider || focusedProvider === 'google') {
         promises.push(streamAnswer('google', [...googleMessages, userMsg], activeSessionId!, controller.signal, image));
     }
-    if (!focusedProvider || focusedProvider === 'groq') {
-        promises.push(streamAnswer('groq', [...groqMessages, { ...userMsg, provider: 'groq' }], activeSessionId!, controller.signal, image));
+
+    // 2. Groq (Llama) - Runs ONLY if NO image AND (focused OR dual mode)
+    if (!image && (!focusedProvider || focusedProvider === 'groq')) {
+        promises.push(streamAnswer('groq', [...groqMessages, { ...userMsg, provider: 'groq' }], activeSessionId!, controller.signal, null));
+    } else if (image && focusedProvider === 'groq') {
+       // If user was focused on Groq but sent an image, we quietly switch to Gemini above
+       // and update the focus state to avoid confusion
+       setFocusedProvider('google');
     }
+    // --- ✅ STRICT PROVIDER LOGIC END ---
 
     await Promise.all(promises);
     setLoading(false);
@@ -534,9 +578,9 @@ export default function Home() {
 
         <div className="p-4 mt-auto border-t border-white/5 bg-[#171819] min-w-[280px]">
           <div className="flex items-center gap-3 px-3 py-2.5 hover:bg-[#2c2d2e] rounded-xl cursor-pointer transition-colors group" onClick={handleLogout}>
-             {user.photoURL ? <img src={user.photoURL} className="w-8 h-8 rounded-full border border-gray-600 group-hover:border-gray-400 transition-colors" /> : <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center"><UserIcon size={16} /></div>}
-             <div className="text-sm font-medium truncate flex-1 text-gray-200">{user.displayName}</div>
-             <LogOut size={16} className="text-gray-500 group-hover:text-gray-300 transition-colors" />
+              {user.photoURL ? <img src={user.photoURL} className="w-8 h-8 rounded-full border border-gray-600 group-hover:border-gray-400 transition-colors" /> : <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center"><UserIcon size={16} /></div>}
+              <div className="text-sm font-medium truncate flex-1 text-gray-200">{user.displayName}</div>
+              <LogOut size={16} className="text-gray-500 group-hover:text-gray-300 transition-colors" />
           </div>
         </div>
       </aside>

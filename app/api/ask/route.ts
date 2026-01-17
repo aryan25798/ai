@@ -1,47 +1,47 @@
 import { streamText } from 'ai';
 import { google } from '@ai-sdk/google';
 import { groq } from '@ai-sdk/groq';
-import { db } from '@/lib/firebase';
-import { doc, getDoc } from 'firebase/firestore';
+import { adminDb } from '@/lib/firebaseAdmin';
 
-// ⚠️ SECURITY: Must be 'nodejs' to verify Admin/User status in Firestore reliably.
+// ⚠️ SECURITY: Must be 'nodejs' to use Firebase Admin
 export const runtime = 'nodejs';
 
 export async function POST(req: Request) {
   try {
-    // 1. Extract Data & User ID
+    // 1. Extract Data
     const { messages, provider, image, userId } = await req.json();
 
-    // 2. SECURITY CHECK (The "Gatekeeper")
+    // 2. SECURITY CHECK (Admin SDK)
     if (!userId) {
       return new Response(JSON.stringify({ error: "Unauthorized: No User ID" }), { status: 401 });
     }
 
     try {
-      const userRef = doc(db, 'users', userId);
-      const userSnap = await getDoc(userRef);
+      // ⚡️ Bypass Rules: Admin SDK reads user data directly
+      const userSnap = await adminDb.collection('users').doc(userId).get();
       
-      if (!userSnap.exists()) {
+      if (!userSnap.exists) {
         return new Response(JSON.stringify({ error: "User not found" }), { status: 403 });
       }
 
       const userData = userSnap.data();
       
       // 🛑 BLOCK if Pending or Banned (and not Admin)
-      if (userData.status !== 'approved' && userData.role !== 'admin') {
+      if (userData?.status !== 'approved' && userData?.role !== 'admin') {
          return new Response(JSON.stringify({ error: "Access Denied: Account not approved." }), { status: 403 });
       }
     } catch (dbError) {
-      console.error("Security Check Failed:", dbError);
+      console.error("🔥 Security Check Failed:", dbError);
       return new Response(JSON.stringify({ error: "Security verification failed" }), { status: 500 });
     }
 
     // 3. Model Selection
     let model;
     if (provider === 'google') {
-      // ✅ FIX: Use gemini-1.5-flash (2.5 is not yet public API)
+      // ✅ Gemini 2.5 Flash: Supports Images
       model = google('gemini-2.5-flash'); 
     } else if (provider === 'groq') {
+      // ✅ Llama 3.3 Versatile: Text ONLY (Super fast reasoning)
       model = groq('llama-3.3-70b-versatile'); 
     } else {
       return new Response('Invalid provider', { status: 400 });
@@ -57,24 +57,24 @@ RULES:
 4. **Context**: If an image is present, treat it as the primary source of the question.
 `;
 
-    // 5. Message Formatting
+    // 5. Message Formatting (Strict Separation)
     const coreMessages = messages.map((m: any, index: number) => {
       if (index === messages.length - 1 && m.role === 'user') {
-        if (provider === 'google' && image) {
+        
+        // ✅ LOGIC FIX: Only attach image if provider is GOOGLE
+        // If provider is Groq, we IGNORE the image to prevent crashes.
+        if (image && provider === 'google') {
           return {
             role: 'user',
             content: [
               { type: 'text', text: m.content },
-              { type: 'image', image: image }
+              { type: 'image', image: image } 
             ]
           };
-        } 
-        if (provider === 'groq' && image) {
-          return {
-            role: 'user',
-            content: `${m.content}\n\n[SYSTEM: The user attached an image. The text extracted from it is above. Solve based on this text.]`
-          };
         }
+        
+        // Default (Text Only) for Llama or Gemini without image
+        return { role: 'user', content: m.content };
       }
       return { role: m.role, content: m.content };
     });
@@ -85,13 +85,13 @@ RULES:
       system: systemPrompt,
       messages: coreMessages,
       temperature: 0.1, 
-      maxTokens: 1024, // ✅ FIX: 'maxOutputTokens' is now 'maxTokens' in SDK v6+
+      maxTokens: 1024,
     });
 
     return result.toTextStreamResponse();
 
   } catch (error) {
-    console.error("AI Error:", error);
+    console.error("🔥 AI Error:", error);
     return new Response(JSON.stringify({ error: "Failed to process request" }), { 
       status: 500,
       headers: { 'Content-Type': 'application/json' }
